@@ -15,8 +15,9 @@ Claude（claude.ai / Claude Code 共通）のプラン使用量を端末に常�
 ## 使い方
 
 ```sh
-mise install            # 初回のみ
-mise exec -- python claude_usage.py
+mise install                          # 初回のみ
+mise exec -- python claude_usage.py       # 端末版
+mise exec -- python claude_usage_gui.py   # GUI 版
 ```
 
 実行時依存はないので、mise が無い環境では `/usr/bin/python3 claude_usage.py` でも動く（Python 3.9 以上）。
@@ -24,11 +25,22 @@ mise exec -- python claude_usage.py
 | 引数 | 既定 | 説明 |
 | --- | --- | --- |
 | `--interval` | 60 | ポーリング間隔（秒）。30 未満を指定しても 30 に丸める |
+| `--topmost` | off | GUI 版のみ。ウィンドウを常に手前に表示する |
 
 `Ctrl+C` または `SIGTERM` / `SIGHUP` で終了し、代替画面バッファとカーソル表示を必ず元に戻す。
 
 `←` は API が `is_active` を立てている枠。意味は未確認なので印を付けるだけで解釈はしない。
 使用率 80% 以上を黄、95% 以上を赤で表示する。取得に失敗している間は最後に取れた値と最終更新時刻を表示し続ける。
+
+## GUI 版
+
+`claude_usage_gui.py` は `claude_usage` を import し、取得・解釈（`Poller` / `extract_windows` / `fmt_remaining` / `backoff_delay`）をそのまま使う。差し替えているのは描画層だけで、この層はトークンに触れない。
+
+取得はワーカースレッドで回し、結果を `queue` 経由で Tk のメインスレッドに渡す。ウィンドウを閉じると `threading.Event` が立ってスレッドの待機が即座に解ける。
+
+背景色は `systemWindowBackgroundColor` の輝度から明暗を判定するため、macOS のダークモードに追従する。使用率の閾値（80% 黄 / 95% 赤）は端末版と同じで、テストで両者の一致を検証している。
+
+Tk 9.0 を前提にしている。`/usr/bin/python3` の Tk 8.5 は Apple の古いビルドなので、GUI 版は mise の Python で動かすこと。端末版は従来どおり Python 3.9 以上であれば動く。
 
 ## テスト
 
