@@ -27,7 +27,7 @@ import urllib.request
 API_URL = "https://api.anthropic.com/api/oauth/usage"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
-LOCK_PATH = os.path.join(tempfile.gettempdir(), "claude-usage-%d.lock" % os.getuid())
+LOCK_PATH = os.path.join(tempfile.gettempdir(), "claude-codex-usage-%d.lock" % os.getuid())
 
 HTTP_TIMEOUT = 20
 MIN_INTERVAL = 120
@@ -533,7 +533,7 @@ def acquire_lock(path=None):
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         handle.close()
-        raise LockError("claude_usage は既に起動しています") from None
+        raise LockError("claude-codex-usage は既に起動しています") from None
     return handle
 
 

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""claude_usage の GUI 版。
+"""Claude と Codex の使用量をまとめて表示する GUI 版。
 
-取得・解釈は claude_usage をそのまま使い、描画だけを tkinter に差し替える。
-トークンの扱いは CLI 版と同じで、この層はトークンに一切触れない。
+取得・解釈は各サービスのモジュールに任せ、描画だけを tkinter で共通化する。
+この層はトークンに一切触れない。
 """
 
 import argparse
 import collections
 import datetime
+import os
 import queue
 import sys
 import threading
@@ -16,19 +17,24 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 import claude_usage as cu
+import codex_usage as xu
 
-WINDOW_TITLE = "Claude Usage"
+WINDOW_TITLE = "Claude + Codex Usage"
 DEFAULT_WIDTH = 400
 MIN_SIZE = (300, 150)
 PAD_X = 18
 PAD_TOP = 14
 PAD_BOTTOM = 14
 ROW_GAP = 14
+SECTION_GAP = 24
 BAR_HEIGHT = 8
 DOT_RADIUS = 3
 LABEL_INDENT = 12
+ICON_SIZE = 32
+ICON_GAP = 10
 DRAIN_INTERVAL_MS = 200
 TICK_INTERVAL_MS = 30000
+ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 LIGHT = {
     "dim": "#86868b",
@@ -82,22 +88,26 @@ class FetchControl(object):
             return self._stopped
 
 
-def fetch_loop(poller, interval, publish, wait, should_stop):
+def fetch_loop(
+    poller, interval, publish, wait, should_stop,
+    extractor=cu.extract_windows, credentials_error=cu.CredentialsError,
+    usage_error=cu.UsageError,
+):
     failures = 0
     while not should_stop():
         retry_after = None
         rate_limited = False
         try:
-            publish(Update(cu.extract_windows(poller.poll()), None, datetime.datetime.now()))
+            publish(Update(extractor(poller.poll()), None, datetime.datetime.now()))
             failures = 0
-        except cu.CredentialsError as exc:
+        except credentials_error as exc:
             poller.invalidate()
             publish(Update(None, str(exc), None))
             failures += 1
-        except cu.UsageError as exc:
+        except usage_error as exc:
             publish(Update(None, str(exc), None))
-            retry_after = exc.retry_after
-            rate_limited = exc.status == 429
+            retry_after = getattr(exc, "retry_after", None)
+            rate_limited = getattr(exc, "status", None) == 429
             failures += 1
         wait(cu.backoff_delay(interval, failures, retry_after, rate_limited))
 
@@ -126,11 +136,11 @@ def bar_color(percent, palette):
 class UsageWindow(object):
     def __init__(self, root, interval, topmost=False):
         self.root = root
-        self.windows = []
-        self.error = None
-        self.last_ok_at = None
+        self.sources = {
+            "claude": self._source("Claude Usage"),
+            "codex": self._source("Codex Usage"),
+        }
         self.row_count = None
-        self.refreshing = True
 
         base = tkfont.nametofont("TkDefaultFont").actual("size")
         self.font_title = tkfont.Font(font="TkDefaultFont")
@@ -143,6 +153,13 @@ class UsageWindow(object):
         self.font_value.configure(size=base + 1)
         self.font_small = tkfont.Font(font="TkDefaultFont")
         self.font_small.configure(size=max(base - 1, 8))
+
+        # PhotoImage は参照が切れると Canvas から消えるため、ウィンドウと同じ
+        # 寿命で保持する。素材は原本から表示サイズへ高品質に縮小済み。
+        self.icons = {
+            "claude": tk.PhotoImage(master=root, file=os.path.join(ASSET_DIR, "claude.png")),
+            "codex": tk.PhotoImage(master=root, file=os.path.join(ASSET_DIR, "codex.png")),
+        }
 
         root.title(WINDOW_TITLE)
         root.minsize(*MIN_SIZE)
@@ -160,36 +177,49 @@ class UsageWindow(object):
         root.bind("<Control-r>", self.refresh)
 
         self.queue = queue.Queue()
-        self.fetch_control = FetchControl()
-        self.thread = threading.Thread(
-            target=fetch_loop,
-            args=(
-                cu.Poller(), interval, self.queue.put,
-                self.fetch_control.wait, self.fetch_control.is_stopped,
-            ),
-            daemon=True,
-        )
-        self.thread.start()
+        self._start_source("claude", cu.Poller(), interval, cu.extract_windows, cu.CredentialsError, cu.UsageError)
+        self._start_source("codex", xu.Poller(), interval, xu.extract_windows, (), xu.CodexUsageError)
 
         self.root.after(DRAIN_INTERVAL_MS, self._drain)
         self.root.after(TICK_INTERVAL_MS, self._tick)
 
     # 受信
 
+    @staticmethod
+    def _source(title):
+        return {
+            "title": title, "windows": [], "error": None, "last_ok_at": None,
+            "refreshing": True, "control": FetchControl(), "thread": None,
+        }
+
+    def _start_source(self, name, poller, interval, extractor, credentials_error, usage_error):
+        source = self.sources[name]
+        source["thread"] = threading.Thread(
+            target=fetch_loop,
+            args=(
+                poller, interval, lambda update: self.queue.put((name, update)),
+                source["control"].wait, source["control"].is_stopped,
+                extractor, credentials_error, usage_error,
+            ),
+            daemon=True,
+        )
+        source["thread"].start()
+
     def _drain(self):
         received = False
         while True:
             try:
-                update = self.queue.get_nowait()
+                name, update = self.queue.get_nowait()
             except queue.Empty:
                 break
             received = True
-            self.error = update.error
+            source = self.sources[name]
+            source["error"] = update.error
             if update.windows is not None:
-                self.windows = update.windows
-                self.last_ok_at = update.at
+                source["windows"] = update.windows
+                source["last_ok_at"] = update.at
+            source["refreshing"] = False
         if received:
-            self.refreshing = False
             self.redraw()
         self.root.after(DRAIN_INTERVAL_MS, self._drain)
 
@@ -198,10 +228,16 @@ class UsageWindow(object):
         self.root.after(TICK_INTERVAL_MS, self._tick)
 
     def refresh(self, event=None):
-        if self.refreshing:
+        for name in self.sources:
+            self.refresh_source(name)
+        return "break"
+
+    def refresh_source(self, name, event=None):
+        source = self.sources[name]
+        if source["refreshing"]:
             return "break"
-        self.refreshing = True
-        self.fetch_control.request_refresh()
+        source["refreshing"] = True
+        source["control"].request_refresh()
         self.redraw()
         return "break"
 
@@ -230,39 +266,57 @@ class UsageWindow(object):
 
         width = canvas.winfo_width() or DEFAULT_WIDTH
         y = PAD_TOP
-        canvas.create_text(PAD_X, y, text=WINDOW_TITLE, anchor="nw", fill=palette["fg"], font=self.font_title)
-        y += self.font_title.metrics("linespace") + 12
+        for index, (name, source) in enumerate(self.sources.items()):
+            if index:
+                y += SECTION_GAP
+            y = self._draw_source(canvas, name, source, y, width, palette)
 
-        if not self.windows:
-            message = "取得中…" if self.error is None else "表示できる枠がありません"
+        signature = tuple(
+            (len(s["windows"]), bool(s["error"])) for s in self.sources.values()
+        )
+        self._fit_height(signature, y + PAD_BOTTOM)
+
+    def _draw_source(self, canvas, name, source, y, width, palette):
+        icon = self.icons[name]
+        canvas.create_image(PAD_X, y, image=icon, anchor="nw")
+        title_y = y + max((ICON_SIZE - self.font_title.metrics("linespace")) / 2.0, 0)
+        canvas.create_text(
+            PAD_X + ICON_SIZE + ICON_GAP, title_y, text=source["title"],
+            anchor="nw", fill=palette["fg"], font=self.font_title,
+        )
+        y += max(ICON_SIZE, self.font_title.metrics("linespace")) + 12
+
+        if not source["windows"]:
+            message = "取得中…" if source["error"] is None else "表示できる枠がありません"
             canvas.create_text(PAD_X, y, text=message, anchor="nw", fill=palette["dim"], font=self.font_label)
             y += self.font_label.metrics("linespace") + ROW_GAP
-        remaining = ["%s · %s" % (cu.fmt_remaining(w.resets_at), cu.fmt_reset_at(w.resets_at)) for w in self.windows]
+        remaining = ["%s · %s" % (cu.fmt_remaining(w.resets_at), cu.fmt_reset_at(w.resets_at)) for w in source["windows"]]
         column = max([self.font_small.measure(text) for text in remaining] + [0])
-        for window, text in zip(self.windows, remaining):
+        for window, text in zip(source["windows"], remaining):
             y = self._draw_row(canvas, window, y, width, palette, text, column)
 
         y += 2
-        stamp = "未取得" if self.last_ok_at is None else "最終更新 " + self.last_ok_at.strftime("%H:%M:%S")
+        stamp = "未取得" if source["last_ok_at"] is None else "最終更新 " + source["last_ok_at"].strftime("%H:%M:%S")
         icon = "↻"
-        icon_color = palette["dim"] if self.refreshing else palette["fg"]
+        icon_color = palette["dim"] if source["refreshing"] else palette["fg"]
+        tag = "refresh_" + name
         canvas.create_text(
             PAD_X, y, text=icon, anchor="nw", fill=icon_color,
-            font=self.font_label, tags=("refresh",),
+            font=self.font_label, tags=(tag,),
         )
-        canvas.tag_bind("refresh", "<Button-1>", self.refresh)
+        canvas.tag_bind(tag, "<Button-1>", lambda event, key=name: self.refresh_source(key, event))
         stamp_x = PAD_X + self.font_label.measure(icon) + 6
         canvas.create_text(stamp_x, y, text=stamp, anchor="nw", fill=palette["dim"], font=self.font_small)
         y += max(self.font_label.metrics("linespace"), self.font_small.metrics("linespace"))
-        if self.error:
+        if source["error"]:
             y += 2
             canvas.create_text(
-                PAD_X, y, text="取得失敗: " + self.error, anchor="nw",
+                PAD_X, y, text="取得失敗: " + source["error"], anchor="nw",
                 fill=palette["warn"], font=self.font_small, width=width - PAD_X * 2,
             )
             y += self.font_small.metrics("linespace")
 
-        self._fit_height(len(self.windows), y + PAD_BOTTOM)
+        return y
 
     def _draw_row(self, canvas, window, y, width, palette, remaining, column):
         label_font = self.font_label_active if window.is_active else self.font_label
@@ -308,12 +362,13 @@ class UsageWindow(object):
         self.root.geometry("%dx%d" % (self.root.winfo_width() or DEFAULT_WIDTH, int(height)))
 
     def close(self):
-        self.fetch_control.stop()
+        for source in self.sources.values():
+            source["control"].stop()
         self.root.destroy()
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Claude のプラン使用量を GUI で常時表示する")
+    parser = argparse.ArgumentParser(description="Claude と Codex のプラン使用量を GUI で常時表示する")
     parser.add_argument(
         "--interval",
         type=int,

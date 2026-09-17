@@ -1,6 +1,6 @@
-# claude-usage
+# claude-codex-usage
 
-Claude（claude.ai / Claude Code 共通）のプラン使用量を端末に常時表示する。
+Claude（claude.ai / Claude Code 共通）と Codex のプラン使用量を常時表示する。GUI 版は両方をまとめて表示し、端末版は Claude のみを表示する。
 
 ```
  Claude Usage
@@ -10,14 +10,21 @@ Claude（claude.ai / Claude Code 共通）のプラン使用量を端末に常�
  週次 (Fable)     ████████████░░░░░░░░░░░░   52%  4d 9h     9/22(火) 02:00  ←
 
  最終更新 16:45:40
+
+ Codex Usage
+
+ 5時間枠          ████░░░░░░░░░░░░░░░░░░░░   18%  3h 12m    9/17(木) 20:00
+ 週次             █░░░░░░░░░░░░░░░░░░░░░░░    3%  6d 22h   9/24(木) 15:00
+
+ 最終更新 16:45:39
 ```
 
 ## 使い方
 
 ```sh
 mise install                          # 初回のみ
-mise exec -- python claude_usage.py       # 端末版
-mise exec -- python claude_usage_gui.py   # GUI 版
+mise exec -- python claude_usage.py             # Claude の端末版
+mise exec -- python claude_codex_usage_gui.py   # Claude + Codex の GUI 版
 ```
 
 実行時依存はないので、mise が無い環境では `/usr/bin/python3 claude_usage.py` でも動く（Python 3.9 以上）。
@@ -27,7 +34,7 @@ mise exec -- python claude_usage_gui.py   # GUI 版
 | `--interval` | 300 | ポーリング間隔（秒）。120 未満を指定しても 120 に丸める |
 | `--topmost` | off | GUI 版のみ。ウィンドウを常に手前に表示する |
 
-端末版と GUI 版は合わせて1つしか起動できない。2つ目は「既に起動しています」と出して終了コード 1 で終わる。ロックは `$TMPDIR/claude-usage-<uid>.lock` への `flock` で、プロセスが終われば自動で外れる。
+端末版と GUI 版は合わせて1つしか起動できない。2つ目は「既に起動しています」と出して終了コード 1 で終わる。ロックは `$TMPDIR/claude-codex-usage-<uid>.lock` への `flock` で、プロセスが終われば自動で外れる。
 
 取得に失敗すると間隔を倍々に延ばす（通常の間隔を下回らない）。上限は 300 秒で、429 のときだけ 1800 秒。`Retry-After` の方が長ければそちらに従う。
 
@@ -39,12 +46,16 @@ mise exec -- python claude_usage_gui.py   # GUI 版
 
 ## GUI 版
 
-`claude_usage_gui.py` は `claude_usage` を import し、取得・解釈（`Poller` / `extract_windows` / `fmt_remaining` / `fmt_reset_at` / `backoff_delay`）をそのまま使う。差し替えているのは描画層だけで、この層はトークンに触れない。
+`claude_codex_usage_gui.py` は Claude と Codex の取得・解釈を各モジュールに任せ、描画を共通化する。この層はトークンに触れない。
 
 取得はワーカースレッドで回し、結果を `queue` 経由で Tk のメインスレッドに渡す。ウィンドウを閉じると待機中のスレッドも即座に終了する。
-最終更新時刻の左にある更新アイコンを押すと、次のポーリングを待たずに再取得する。`Command-R` / `Ctrl-R` でも更新でき、取得中の重複リクエストは送らない。
+Claude と Codex は別々のワーカースレッドで更新する。各セクションの最終更新時刻の左にある更新アイコンを押すと、そのサービスだけを再取得する。`Command-R` / `Ctrl-R` では両方を更新し、取得中のサービスには重複リクエストを送らない。片方の取得失敗やバックオフはもう片方に影響しない。
+
+Codex は `~/.codex/sessions/**/rollout-*.jsonl` に保存された最新の `token_count.rate_limits` を読み取る。認証情報やネットワークには触れない。値は Codex が応答を受け取ったときに更新されるため、Codex セクションの更新操作はディスク上の最新値を再読込する。
 
 背景色は `systemWindowBackgroundColor` の輝度から明暗を判定するため、macOS のダークモードに追従する。使用率の閾値（80% 黄 / 95% 赤）は端末版と同じで、テストで両者の一致を検証している。
+
+セクション見出しのアイコンは、[Anthropic の公式プレスキット](https://www.anthropic.com/press-kit)で配布されている Claude アイコンと、[OpenAI の公式 ChatGPT アプリ](https://chatgpt.com/download/)の製品アイコンを使用している。Claude、ChatGPT、Codex、および各ロゴは各社の商標であり、本ツールが両社から承認・後援を受けていることを示すものではない。
 
 Tk 9.0 を前提にしている。`/usr/bin/python3` の Tk 8.5 は Apple の古いビルドなので、GUI 版は mise の Python で動かすこと。端末版は従来どおり Python 3.9 以上であれば動く。
 
@@ -54,7 +65,7 @@ Tk 9.0 を前提にしている。`/usr/bin/python3` の Tk 8.5 は Apple の古
 mise exec -- python -m unittest discover -s tests -t .
 ```
 
-ネットワークと Keychain は mock するため、実トークンも通信も発生しない。
+ネットワーク、Keychain、Codex のセッション記録は mock または一時ファイルを使うため、実トークンも通信も発生しない。
 
 ## 認証情報の扱い
 

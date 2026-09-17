@@ -1,13 +1,25 @@
 # -*- coding: utf-8 -*-
 """GUI 版のうち tkinter に依存しない部分のテスト。ウィンドウは開かない。"""
 
+import os
+import struct
 import unittest
 from unittest import mock
 
 import claude_usage as cu
-import claude_usage_gui as gui
+import claude_codex_usage_gui as gui
 
 SAMPLE = {"limits": [{"kind": "session", "percent": 40, "resets_at": None, "is_active": False}]}
+
+
+class IconAssetTest(unittest.TestCase):
+    def test_official_product_icons_are_bundled_at_render_resolution(self):
+        for name in ("claude", "codex"):
+            path = os.path.join(gui.ASSET_DIR, name + ".png")
+            with open(path, "rb") as image:
+                header = image.read(24)
+            self.assertEqual(header[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(struct.unpack(">II", header[16:24]), (32, 32))
 
 
 class Recorder(object):
@@ -131,22 +143,55 @@ class FetchLoopTest(unittest.TestCase):
 class UsageWindowRefreshTest(unittest.TestCase):
     def test_refresh_updates_ui_and_wakes_worker(self):
         window = object.__new__(gui.UsageWindow)
-        window.refreshing = False
-        window.fetch_control = mock.Mock()
+        window.sources = {"claude": gui.UsageWindow._source("Claude Usage")}
+        source = window.sources["claude"]
+        source["refreshing"] = False
+        source["control"].request_refresh = mock.Mock()
         window.redraw = mock.Mock()
 
-        self.assertEqual(window.refresh(), "break")
-        self.assertTrue(window.refreshing)
-        window.fetch_control.request_refresh.assert_called_once_with()
+        self.assertEqual(window.refresh_source("claude"), "break")
+        self.assertTrue(source["refreshing"])
+        source["control"].request_refresh.assert_called_once_with()
         window.redraw.assert_called_once_with()
+
+    def test_refresh_source_wakes_only_requested_worker(self):
+        window = object.__new__(gui.UsageWindow)
+        window.sources = {
+            "claude": gui.UsageWindow._source("Claude Usage"),
+            "codex": gui.UsageWindow._source("Codex Usage"),
+        }
+        for source in window.sources.values():
+            source["refreshing"] = False
+            source["control"].request_refresh = mock.Mock()
+        window.redraw = mock.Mock()
+
+        window.refresh_source("codex")
+        window.sources["codex"]["control"].request_refresh.assert_called_once_with()
+        window.sources["claude"]["control"].request_refresh.assert_not_called()
+        window.redraw.assert_called_once_with()
+
+    def test_keyboard_refresh_wakes_both_workers(self):
+        window = object.__new__(gui.UsageWindow)
+        window.sources = {
+            "claude": gui.UsageWindow._source("Claude Usage"),
+            "codex": gui.UsageWindow._source("Codex Usage"),
+        }
+        window.refresh_source = mock.Mock(return_value="break")
+
+        self.assertEqual(window.refresh(), "break")
+        self.assertEqual(
+            window.refresh_source.call_args_list,
+            [mock.call("claude"), mock.call("codex")],
+        )
 
     def test_refresh_while_fetching_does_not_queue_another_request(self):
         window = object.__new__(gui.UsageWindow)
-        window.refreshing = True
-        window.fetch_control = mock.Mock()
+        window.sources = {"claude": gui.UsageWindow._source("Claude Usage")}
+        source = window.sources["claude"]
+        source["control"].request_refresh = mock.Mock()
 
-        self.assertEqual(window.refresh(), "break")
-        window.fetch_control.request_refresh.assert_not_called()
+        self.assertEqual(window.refresh_source("claude"), "break")
+        source["control"].request_refresh.assert_not_called()
 
 
 class PaletteTest(unittest.TestCase):
