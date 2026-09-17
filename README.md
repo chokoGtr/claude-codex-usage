@@ -41,7 +41,8 @@ mise exec -- python claude_usage_gui.py   # GUI 版
 
 `claude_usage_gui.py` は `claude_usage` を import し、取得・解釈（`Poller` / `extract_windows` / `fmt_remaining` / `fmt_reset_at` / `backoff_delay`）をそのまま使う。差し替えているのは描画層だけで、この層はトークンに触れない。
 
-取得はワーカースレッドで回し、結果を `queue` 経由で Tk のメインスレッドに渡す。ウィンドウを閉じると `threading.Event` が立ってスレッドの待機が即座に解ける。
+取得はワーカースレッドで回し、結果を `queue` 経由で Tk のメインスレッドに渡す。ウィンドウを閉じると待機中のスレッドも即座に終了する。
+最終更新時刻の左にある更新アイコンを押すと、次のポーリングを待たずに再取得する。`Command-R` / `Ctrl-R` でも更新でき、取得中の重複リクエストは送らない。
 
 背景色は `systemWindowBackgroundColor` の輝度から明暗を判定するため、macOS のダークモードに追従する。使用率の閾値（80% 黄 / 95% 赤）は端末版と同じで、テストで両者の一致を検証している。
 

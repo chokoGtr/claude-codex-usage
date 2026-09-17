@@ -93,6 +93,61 @@ class FetchLoopTest(unittest.TestCase):
         self.assertNotIn("Bearer", repr(rec.updates))
         self.assertNotIn("sk-ant", repr(rec.updates))
 
+    def test_manual_refresh_interrupts_wait_and_polls_again(self):
+        poller = mock.Mock()
+        poller.poll.return_value = SAMPLE
+        control = gui.FetchControl()
+        updates = []
+
+        def publish(update):
+            updates.append(update)
+            if len(updates) == 1:
+                control.request_refresh()
+            else:
+                control.stop()
+
+        gui.fetch_loop(poller, 3600, publish, control.wait, control.is_stopped)
+        self.assertEqual(poller.poll.call_count, 2)
+        self.assertEqual(len(updates), 2)
+
+    def test_repeated_manual_refresh_requests_are_coalesced(self):
+        poller = mock.Mock()
+        poller.poll.return_value = SAMPLE
+        control = gui.FetchControl()
+        updates = []
+
+        def publish(update):
+            updates.append(update)
+            if len(updates) == 1:
+                control.request_refresh()
+                control.request_refresh()
+            else:
+                control.stop()
+
+        gui.fetch_loop(poller, 3600, publish, control.wait, control.is_stopped)
+        self.assertEqual(poller.poll.call_count, 2)
+
+
+class UsageWindowRefreshTest(unittest.TestCase):
+    def test_refresh_updates_ui_and_wakes_worker(self):
+        window = object.__new__(gui.UsageWindow)
+        window.refreshing = False
+        window.fetch_control = mock.Mock()
+        window.redraw = mock.Mock()
+
+        self.assertEqual(window.refresh(), "break")
+        self.assertTrue(window.refreshing)
+        window.fetch_control.request_refresh.assert_called_once_with()
+        window.redraw.assert_called_once_with()
+
+    def test_refresh_while_fetching_does_not_queue_another_request(self):
+        window = object.__new__(gui.UsageWindow)
+        window.refreshing = True
+        window.fetch_control = mock.Mock()
+
+        self.assertEqual(window.refresh(), "break")
+        window.fetch_control.request_refresh.assert_not_called()
+
 
 class PaletteTest(unittest.TestCase):
     def test_dark_background(self):

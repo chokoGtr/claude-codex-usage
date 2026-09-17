@@ -51,6 +51,37 @@ Update = collections.namedtuple("Update", "windows error at")
 # --- 取得ループ（tkinter に依存しない） -----------------------------------
 
 
+class FetchControl(object):
+    """取得スレッドの待機を、手動更新または終了で解除する。"""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._refresh_requested = False
+        self._stopped = False
+
+    def wait(self, seconds):
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._refresh_requested or self._stopped,
+                timeout=seconds,
+            )
+            self._refresh_requested = False
+
+    def request_refresh(self):
+        with self._condition:
+            self._refresh_requested = True
+            self._condition.notify()
+
+    def stop(self):
+        with self._condition:
+            self._stopped = True
+            self._condition.notify()
+
+    def is_stopped(self):
+        with self._condition:
+            return self._stopped
+
+
 def fetch_loop(poller, interval, publish, wait, should_stop):
     failures = 0
     while not should_stop():
@@ -99,6 +130,7 @@ class UsageWindow(object):
         self.error = None
         self.last_ok_at = None
         self.row_count = None
+        self.refreshing = True
 
         base = tkfont.nametofont("TkDefaultFont").actual("size")
         self.font_title = tkfont.Font(font="TkDefaultFont")
@@ -124,11 +156,17 @@ class UsageWindow(object):
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda event: self.redraw())
 
+        root.bind("<Command-r>", self.refresh)
+        root.bind("<Control-r>", self.refresh)
+
         self.queue = queue.Queue()
-        self.stop_event = threading.Event()
+        self.fetch_control = FetchControl()
         self.thread = threading.Thread(
             target=fetch_loop,
-            args=(cu.Poller(), interval, self.queue.put, self.stop_event.wait, self.stop_event.is_set),
+            args=(
+                cu.Poller(), interval, self.queue.put,
+                self.fetch_control.wait, self.fetch_control.is_stopped,
+            ),
             daemon=True,
         )
         self.thread.start()
@@ -151,12 +189,21 @@ class UsageWindow(object):
                 self.windows = update.windows
                 self.last_ok_at = update.at
         if received:
+            self.refreshing = False
             self.redraw()
         self.root.after(DRAIN_INTERVAL_MS, self._drain)
 
     def _tick(self):
         self.redraw()  # 残り時間の表示を進める
         self.root.after(TICK_INTERVAL_MS, self._tick)
+
+    def refresh(self, event=None):
+        if self.refreshing:
+            return "break"
+        self.refreshing = True
+        self.fetch_control.request_refresh()
+        self.redraw()
+        return "break"
 
     # 描画
 
@@ -197,8 +244,16 @@ class UsageWindow(object):
 
         y += 2
         stamp = "未取得" if self.last_ok_at is None else "最終更新 " + self.last_ok_at.strftime("%H:%M:%S")
-        canvas.create_text(PAD_X, y, text=stamp, anchor="nw", fill=palette["dim"], font=self.font_small)
-        y += self.font_small.metrics("linespace")
+        icon = "↻"
+        icon_color = palette["dim"] if self.refreshing else palette["fg"]
+        canvas.create_text(
+            PAD_X, y, text=icon, anchor="nw", fill=icon_color,
+            font=self.font_label, tags=("refresh",),
+        )
+        canvas.tag_bind("refresh", "<Button-1>", self.refresh)
+        stamp_x = PAD_X + self.font_label.measure(icon) + 6
+        canvas.create_text(stamp_x, y, text=stamp, anchor="nw", fill=palette["dim"], font=self.font_small)
+        y += max(self.font_label.metrics("linespace"), self.font_small.metrics("linespace"))
         if self.error:
             y += 2
             canvas.create_text(
@@ -253,7 +308,7 @@ class UsageWindow(object):
         self.root.geometry("%dx%d" % (self.root.winfo_width() or DEFAULT_WIDTH, int(height)))
 
     def close(self):
-        self.stop_event.set()
+        self.fetch_control.stop()
         self.root.destroy()
 
 
