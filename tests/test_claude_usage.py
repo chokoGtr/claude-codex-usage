@@ -183,6 +183,15 @@ class BackoffTest(unittest.TestCase):
         self.assertEqual(cu.backoff_delay(30, 1, retry_after=120), 120)
         self.assertEqual(cu.backoff_delay(30, 1, retry_after=10), 30)
 
+    def test_rate_limited_uses_longer_cap(self):
+        self.assertEqual(cu.backoff_delay(300, 3, rate_limited=True), 1200)
+        self.assertEqual(cu.backoff_delay(300, 20, rate_limited=True), cu.MAX_BACKOFF_RATE_LIMITED)
+        self.assertEqual(cu.backoff_delay(300, 20), cu.MAX_BACKOFF)
+
+    def test_never_shorter_than_interval(self):
+        self.assertEqual(cu.backoff_delay(600, 5), 600)
+        self.assertEqual(cu.backoff_delay(3600, 5, rate_limited=True), 3600)
+
 
 class RetryAfterParseTest(unittest.TestCase):
     def _error(self, value):
@@ -463,6 +472,21 @@ class RunLoopTest(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             cu.run(60, stream, poller=poller, sleep=sleep)
         self.assertEqual(delays, [200])
+
+    def test_rate_limit_backs_off_beyond_normal_cap(self):
+        poller = mock.Mock()
+        poller.poll.side_effect = cu.UsageError(429, "HTTP 429")
+        delays = []
+        stream = io.StringIO()
+
+        def sleep(seconds):
+            delays.append(seconds)
+            if len(delays) == 4:
+                raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            cu.run(300, stream, poller=poller, sleep=sleep)
+        self.assertEqual(delays, [300, 600, 1200, 1800])
 
 
 class CliTest(unittest.TestCase):

@@ -55,6 +55,7 @@ def fetch_loop(poller, interval, publish, wait, should_stop):
     failures = 0
     while not should_stop():
         retry_after = None
+        rate_limited = False
         try:
             publish(Update(cu.extract_windows(poller.poll()), None, datetime.datetime.now()))
             failures = 0
@@ -65,8 +66,9 @@ def fetch_loop(poller, interval, publish, wait, should_stop):
         except cu.UsageError as exc:
             publish(Update(None, str(exc), None))
             retry_after = exc.retry_after
+            rate_limited = exc.status == 429
             failures += 1
-        wait(cu.backoff_delay(interval, failures, retry_after))
+        wait(cu.backoff_delay(interval, failures, retry_after, rate_limited))
 
 
 # --- 配色 -----------------------------------------------------------------

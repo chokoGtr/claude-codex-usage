@@ -57,6 +57,13 @@ class FetchLoopTest(unittest.TestCase):
         gui.fetch_loop(poller, 60, rec.publish, rec.wait, rec.should_stop)
         self.assertEqual(rec.delays, [200])
 
+    def test_rate_limit_backs_off_beyond_normal_cap(self):
+        poller = mock.Mock()
+        poller.poll.side_effect = cu.UsageError(429, "HTTP 429")
+        rec = Recorder(stop_after=4)
+        gui.fetch_loop(poller, 300, rec.publish, rec.wait, rec.should_stop)
+        self.assertEqual(rec.delays, [300, 600, 1200, 1800])
+
     def test_credentials_error_invalidates_poller(self):
         poller = mock.Mock()
         poller.poll.side_effect = cu.CredentialsError("読めません")

@@ -27,9 +27,10 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 
 HTTP_TIMEOUT = 20
-MIN_INTERVAL = 30
-DEFAULT_INTERVAL = 60
+MIN_INTERVAL = 120
+DEFAULT_INTERVAL = 300
 MAX_BACKOFF = 300
+MAX_BACKOFF_RATE_LIMITED = 1800
 MAX_RETRY_AFTER = 3600
 EXPIRY_MARGIN_SEC = 60
 
@@ -426,11 +427,12 @@ def draw(stream, lines):
 # --- ポーリング -----------------------------------------------------------
 
 
-def backoff_delay(interval, failures, retry_after=None):
+def backoff_delay(interval, failures, retry_after=None, rate_limited=False):
     if failures <= 0:
         delay = interval
     else:
-        delay = min(interval * (2 ** min(failures - 1, 10)), MAX_BACKOFF)
+        cap = MAX_BACKOFF_RATE_LIMITED if rate_limited else MAX_BACKOFF
+        delay = max(interval, min(interval * (2 ** min(failures - 1, 10)), cap))
     if retry_after is not None:
         delay = max(delay, retry_after)
     return delay
@@ -477,6 +479,7 @@ def run(interval, stream, poller=None, sleep=time.sleep):
 
     while True:
         retry_after = None
+        rate_limited = False
         try:
             windows = extract_windows(poller.poll())
             last_ok_at = datetime.datetime.now()
@@ -489,11 +492,12 @@ def run(interval, stream, poller=None, sleep=time.sleep):
         except UsageError as exc:
             error = str(exc)
             retry_after = exc.retry_after
+            rate_limited = exc.status == 429
             failures += 1
 
         term_width = shutil.get_terminal_size((80, 24)).columns
         draw(stream, render_lines(windows, last_ok_at, error, term_width))
-        sleep(backoff_delay(interval, failures, retry_after))
+        sleep(backoff_delay(interval, failures, retry_after, rate_limited))
 
 
 def _exit_on_signal(signum, frame):
