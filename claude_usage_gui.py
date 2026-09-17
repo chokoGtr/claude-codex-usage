@@ -268,9 +268,16 @@ def main(argv=None):
     parser.add_argument("--topmost", action="store_true", help="ウィンドウを常に手前に表示する")
     args = parser.parse_args(argv)
 
-    root = tk.Tk()
-    UsageWindow(root, max(args.interval, cu.MIN_INTERVAL), topmost=args.topmost)
-    root.mainloop()
+    try:
+        lock = cu.acquire_lock()
+    except cu.LockError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 1
+
+    with lock:
+        root = tk.Tk()
+        UsageWindow(root, max(args.interval, cu.MIN_INTERVAL), topmost=args.topmost)
+        root.mainloop()
     return 0
 
 

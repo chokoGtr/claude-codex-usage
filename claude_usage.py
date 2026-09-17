@@ -10,6 +10,7 @@ Claude Code が保存している OAuth アクセストークンで叩く。
 import argparse
 import collections
 import datetime
+import fcntl
 import json
 import os
 import platform
@@ -17,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import urllib.error
@@ -25,6 +27,7 @@ import urllib.request
 API_URL = "https://api.anthropic.com/api/oauth/usage"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
+LOCK_PATH = os.path.join(tempfile.gettempdir(), "claude-usage-%d.lock" % os.getuid())
 
 HTTP_TIMEOUT = 20
 MIN_INTERVAL = 120
@@ -56,6 +59,10 @@ MIN_BAR_WIDTH = 8
 
 class CredentialsError(Exception):
     """認証情報を読めなかった。メッセージにトークンは含めない。"""
+
+
+class LockError(Exception):
+    """別のインスタンスが起動している、またはロックファイルを作れない。"""
 
 
 class UsageError(Exception):
@@ -500,6 +507,20 @@ def run(interval, stream, poller=None, sleep=time.sleep):
         sleep(backoff_delay(interval, failures, retry_after, rate_limited))
 
 
+def acquire_lock(path=None):
+    """端末版と GUI 版で共有するロック。返したファイルを閉じるかプロセスが終わると解放される。"""
+    try:
+        handle = open(path or LOCK_PATH, "a")
+    except OSError:
+        raise LockError("ロックファイルを作れません") from None
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise LockError("claude_usage は既に起動しています") from None
+    return handle
+
+
 def _exit_on_signal(signum, frame):
     raise SystemExit(0)
 
@@ -525,17 +546,24 @@ def main(argv=None):
     args = parser.parse_args(argv)
     interval = max(args.interval, MIN_INTERVAL)
 
-    _install_signal_handlers()
-    stream = sys.stdout
-    stream.write(ESC_ALT_ON + ESC_HIDE_CURSOR)
-    stream.flush()
     try:
-        run(interval, stream)
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
-        stream.write(ESC_SHOW_CURSOR + ESC_ALT_OFF + ESC_RESET)
+        lock = acquire_lock()
+    except LockError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 1
+
+    with lock:
+        _install_signal_handlers()
+        stream = sys.stdout
+        stream.write(ESC_ALT_ON + ESC_HIDE_CURSOR)
         stream.flush()
+        try:
+            run(interval, stream)
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        finally:
+            stream.write(ESC_SHOW_CURSOR + ESC_ALT_OFF + ESC_RESET)
+            stream.flush()
     return 0
 
 

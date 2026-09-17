@@ -6,6 +6,8 @@ import email.message
 import io
 import re
 import json
+import os
+import tempfile
 import traceback
 import unittest
 import urllib.error
@@ -489,7 +491,47 @@ class RunLoopTest(unittest.TestCase):
         self.assertEqual(delays, [300, 600, 1200, 1800])
 
 
+class LockTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "test.lock")
+
+    def test_second_acquire_fails_until_released(self):
+        first = cu.acquire_lock(self.path)
+        with self.assertRaises(cu.LockError):
+            cu.acquire_lock(self.path)
+        first.close()
+        cu.acquire_lock(self.path).close()
+
+    def test_unwritable_location(self):
+        with self.assertRaises(cu.LockError):
+            cu.acquire_lock(os.path.join(self.tmp.name, "missing", "test.lock"))
+
+
 class CliTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(cu, "LOCK_PATH", os.path.join(tmp.name, "test.lock"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_refuses_to_start_when_locked(self):
+        stdout = io.StringIO()
+        with cu.acquire_lock():
+            with mock.patch.object(cu, "run") as run:
+                with mock.patch.object(cu.sys, "stdout", stdout), mock.patch.object(cu.sys, "stderr", io.StringIO()):
+                    self.assertEqual(cu.main([]), 1)
+        self.assertEqual(run.call_count, 0)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_lock_is_released_on_exit(self):
+        with mock.patch.object(cu, "run", side_effect=KeyboardInterrupt):
+            with mock.patch.object(cu.sys, "stdout", io.StringIO()):
+                cu.main([])
+        cu.acquire_lock().close()
+
     def test_interval_lower_bound(self):
         captured = {}
 
