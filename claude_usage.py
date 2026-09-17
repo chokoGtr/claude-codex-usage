@@ -55,6 +55,9 @@ ESC_RED = "\033[31m"
 MAX_LABEL_WIDTH = 20
 MAX_BAR_WIDTH = 24
 MIN_BAR_WIDTH = 8
+RESET_AT_WIDTH = 15
+
+WEEKDAYS = "月火水木金土日"
 
 
 class CredentialsError(Exception):
@@ -345,6 +348,14 @@ def fmt_remaining(value, now=None):
     return "%dm" % minutes
 
 
+def fmt_reset_at(value, tz=None):
+    parsed = parse_iso(value)
+    if parsed is None:
+        return "-"
+    local = parsed.astimezone(tz)
+    return "%d/%d(%s) %02d:%02d" % (local.month, local.day, WEEKDAYS[local.weekday()], local.hour, local.minute)
+
+
 def color(percent):
     if percent >= 95:
         return ESC_RED
@@ -390,12 +401,15 @@ def _truncate(text, width):
     return result + "…"
 
 
-def render_lines(windows, last_ok_at, error, term_width, now=None):
+def render_lines(windows, last_ok_at, error, term_width, now=None, tz=None):
     lines = [" " + ESC_BOLD + "Claude Usage" + ESC_RESET, ""]
 
     labels = [_truncate(w.label, MAX_LABEL_WIDTH) for w in windows]
     label_width = max([display_width(x) for x in labels] + [0])
+    show_reset_at = term_width - label_width - 21 >= RESET_AT_WIDTH + 2
     bar_width = term_width - label_width - 21
+    if show_reset_at:
+        bar_width -= RESET_AT_WIDTH + 2
     bar_width = min(bar_width, MAX_BAR_WIDTH)
     if bar_width < MIN_BAR_WIDTH:
         bar_width = 0
@@ -409,6 +423,8 @@ def render_lines(windows, last_ok_at, error, term_width, now=None):
         if gauge:
             body = "%s%s%s  %s" % (tone, gauge, ESC_RESET if tone else "", body)
         line = " %s  %s  %s" % (_pad(label, label_width), body, _pad(fmt_remaining(window.resets_at, now), 8))
+        if show_reset_at:
+            line += "  " + _pad(fmt_reset_at(window.resets_at, tz), RESET_AT_WIDTH)
         if window.is_active:
             line += " ←"
         lines.append(line)

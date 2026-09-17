@@ -5,9 +5,9 @@ Claude（claude.ai / Claude Code 共通）のプラン使用量を端末に常�
 ```
  Claude Usage
 
- 5時間枠          ██████████░░░░░░░░░░░░░░   43%  1h 54m
- 週次 (全モデル)  ████████░░░░░░░░░░░░░░░░   33%  4d 9h
- 週次 (Fable)     ████████████░░░░░░░░░░░░   52%  4d 9h    ←
+ 5時間枠          ██████████░░░░░░░░░░░░░░   43%  1h 54m    9/17(木) 18:40
+ 週次 (全モデル)  ████████░░░░░░░░░░░░░░░░   33%  4d 9h     9/22(火) 02:00
+ 週次 (Fable)     ████████████░░░░░░░░░░░░   52%  4d 9h     9/22(火) 02:00  ←
 
  最終更新 16:45:40
 ```
@@ -34,11 +34,12 @@ mise exec -- python claude_usage_gui.py   # GUI 版
 `Ctrl+C` または `SIGTERM` / `SIGHUP` で終了し、代替画面バッファとカーソル表示を必ず元に戻す。
 
 `←` は API が `is_active` を立てている枠。意味は未確認なので印を付けるだけで解釈はしない。
+リセット日時はローカル時刻で表示する。端末幅が足りないときは省く。
 使用率 80% 以上を黄、95% 以上を赤で表示する。取得に失敗している間は最後に取れた値と最終更新時刻を表示し続ける。
 
 ## GUI 版
 
-`claude_usage_gui.py` は `claude_usage` を import し、取得・解釈（`Poller` / `extract_windows` / `fmt_remaining` / `backoff_delay`）をそのまま使う。差し替えているのは描画層だけで、この層はトークンに触れない。
+`claude_usage_gui.py` は `claude_usage` を import し、取得・解釈（`Poller` / `extract_windows` / `fmt_remaining` / `fmt_reset_at` / `backoff_delay`）をそのまま使う。差し替えているのは描画層だけで、この層はトークンに触れない。
 
 取得はワーカースレッドで回し、結果を `queue` 経由で Tk のメインスレッドに渡す。ウィンドウを閉じると `threading.Event` が立ってスレッドの待機が即座に解ける。
 

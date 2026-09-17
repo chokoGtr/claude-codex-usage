@@ -146,6 +146,20 @@ class FmtRemainingTest(unittest.TestCase):
         self.assertEqual(cu.fmt_remaining(123, self.NOW), "-")
 
 
+class FmtResetAtTest(unittest.TestCase):
+    JST = datetime.timezone(datetime.timedelta(hours=9))
+
+    def test_local_time_with_weekday(self):
+        self.assertEqual(cu.fmt_reset_at("2026-09-19T17:00:00+00:00", self.JST), "9/20(日) 02:00")
+
+    def test_utc(self):
+        self.assertEqual(cu.fmt_reset_at("2026-12-31T09:05:00Z", datetime.timezone.utc), "12/31(木) 09:05")
+
+    def test_missing_and_invalid(self):
+        self.assertEqual(cu.fmt_reset_at(None), "-")
+        self.assertEqual(cu.fmt_reset_at("not-a-date"), "-")
+
+
 class ColorTest(unittest.TestCase):
     def test_boundaries(self):
         self.assertEqual(cu.color(0), "")
@@ -355,6 +369,19 @@ class RenderTest(unittest.TestCase):
         line = cu.render_lines(windows, None, None, 80, self.NOW)[2]
         self.assertIn(cu.ESC_RED, line)
         self.assertTrue(line.rstrip().endswith("←"))
+
+    def test_reset_at_shown_when_wide(self):
+        windows = [cu.Window("5時間枠", 10.0, "2026-09-15T09:40:00+00:00", False)]
+        jst = datetime.timezone(datetime.timedelta(hours=9))
+        line = _strip_ansi(cu.render_lines(windows, None, None, 80, self.NOW, jst)[2])
+        self.assertIn("2h 40m", line)
+        self.assertIn("9/15(火) 18:40", line)
+
+    def test_reset_at_dropped_when_narrow(self):
+        windows = [cu.Window("5時間枠", 10.0, "2026-09-15T09:40:00+00:00", False)]
+        line = _strip_ansi(cu.render_lines(windows, None, None, 40, self.NOW)[2])
+        self.assertIn("2h 40m", line)
+        self.assertNotIn("(", line)
 
     def test_long_label_is_truncated(self):
         windows = [cu.Window("x" * 60, 10.0, None, False)]

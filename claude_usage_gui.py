@@ -190,7 +190,7 @@ class UsageWindow(object):
             message = "取得中…" if self.error is None else "表示できる枠がありません"
             canvas.create_text(PAD_X, y, text=message, anchor="nw", fill=palette["dim"], font=self.font_label)
             y += self.font_label.metrics("linespace") + ROW_GAP
-        remaining = [cu.fmt_remaining(w.resets_at) for w in self.windows]
+        remaining = ["%s · %s" % (cu.fmt_remaining(w.resets_at), cu.fmt_reset_at(w.resets_at)) for w in self.windows]
         column = max([self.font_small.measure(text) for text in remaining] + [0])
         for window, text in zip(self.windows, remaining):
             y = self._draw_row(canvas, window, y, width, palette, text, column)
