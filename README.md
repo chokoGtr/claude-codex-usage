@@ -1,63 +1,42 @@
 # claude-codex-usage
 
-Claude（claude.ai / Claude Code 共通）と Codex のプラン使用量を常時表示する。GUI 版は両方をまとめて表示し、端末版は Claude のみを表示する。
+Claude と Codex のプラン使用率とリセットまでの時間を常時表示する小さなツール。
+GUI 版は両方、端末版は Claude のみを表示します。実行した人のローカル環境を参照します。
 
-```
- Claude Usage
+## 準備
 
- 5時間枠          ██████████░░░░░░░░░░░░░░   43%  1h 54m    9/17(木) 18:40
- 週次 (全モデル)  ████████░░░░░░░░░░░░░░░░   33%  4d 9h     9/22(火) 02:00
- 週次 (Fable)     ████████████░░░░░░░░░░░░   52%  4d 9h     9/22(火) 02:00  ←
+動作確認は **macOS のみ**です。
 
- 最終更新 16:45:40
+- Python 3.9 以上。GUI は Tk が必要です（動作確認済み: Python 3.14.7 / Tk 9.0）。
+- Claude: Claude Code でサブスクリプションのアカウントにログインしておく。
+- Codex: ローカルのセッション記録に使用量が含まれる環境で、一度応答を受け取っておく。
 
- Codex Usage
-
- 5時間枠          ████░░░░░░░░░░░░░░░░░░░░   18%  3h 12m    9/17(木) 20:00
- 週次             █░░░░░░░░░░░░░░░░░░░░░░░    3%  6d 22h   9/24(木) 15:00
-
- 最終更新 16:45:39
-```
+Python の準備には [mise](https://mise.jdx.dev/) を使えます。
 
 ## 使い方
 
 ```sh
-mise install                          # 初回のみ
-mise exec -- python claude_usage.py             # Claude の端末版
-mise exec -- python claude_codex_usage_gui.py   # Claude + Codex の GUI 版
+git clone https://github.com/chokoGtr/claude-codex-usage.git
+cd claude-codex-usage
+mise trust
+mise install
+mise exec -- python claude_codex_usage_gui.py  # GUI
+# mise exec -- python claude_usage.py          # 端末版
 ```
 
-実行時依存はないので、mise が無い環境では `/usr/bin/python3 claude_usage.py` でも動く（Python 3.9 以上）。
+Python / Tk が揃っていれば `python3 claude_codex_usage_gui.py` でも起動できます。
+追加の Python パッケージや、このツールへのトークン入力は不要です。
 
-| 引数 | 既定 | 説明 |
-| --- | --- | --- |
-| `--interval` | 300 | ポーリング間隔（秒）。120 未満を指定しても 120 に丸める |
-| `--topmost` | off | GUI 版のみ。ウィンドウを常に手前に表示する |
+- `--interval 300`: 更新間隔（秒、既定 300、下限 120）。
+- `--topmost`: GUI を常に手前に表示。
+- GUI の ↻ または `Command-R` / `Ctrl-R` で手動更新。端末版は `Ctrl+C` で終了。
+- 端末版と GUI 版は合わせて 1 つだけ起動できます。
 
-端末版と GUI 版は合わせて1つしか起動できない。2つ目は「既に起動しています」と出して終了コード 1 で終わる。ロックは `$TMPDIR/claude-codex-usage-<uid>.lock` への `flock` で、プロセスが終われば自動で外れる。
+## 注意点
 
-取得に失敗すると間隔を倍々に延ばす（通常の間隔を下回らない）。上限は 300 秒で、429 のときだけ 1800 秒。`Retry-After` の方が長ければそちらに従う。
-
-`Ctrl+C` または `SIGTERM` / `SIGHUP` で終了し、代替画面バッファとカーソル表示を必ず元に戻す。
-
-`←` は API が `is_active` を立てている枠。意味は未確認なので印を付けるだけで解釈はしない。
-リセット日時はローカル時刻で表示する。端末幅が足りないときは省く。
-使用率 80% 以上を黄、95% 以上を赤で表示する。取得に失敗している間は最後に取れた値と最終更新時刻を表示し続ける。
-
-## GUI 版
-
-`claude_codex_usage_gui.py` は Claude と Codex の取得・解釈を各モジュールに任せ、描画を共通化する。この層はトークンに触れない。
-
-取得はワーカースレッドで回し、結果を `queue` 経由で Tk のメインスレッドに渡す。ウィンドウを閉じると待機中のスレッドも即座に終了する。
-Claude と Codex は別々のワーカースレッドで更新する。各セクションの最終更新時刻の左にある更新アイコンを押すと、そのサービスだけを再取得する。`Command-R` / `Ctrl-R` では両方を更新し、取得中のサービスには重複リクエストを送らない。片方の取得失敗やバックオフはもう片方に影響しない。
-
-Codex は `~/.codex/sessions/**/rollout-*.jsonl` に保存された最新の `token_count.rate_limits` を読み取る。認証情報やネットワークには触れない。値は Codex が応答を受け取ったときに更新されるため、Codex セクションの更新操作はディスク上の最新値を再読込する。
-
-背景色は `systemWindowBackgroundColor` の輝度から明暗を判定するため、macOS のダークモードに追従する。使用率の閾値（80% 黄 / 95% 赤）は端末版と同じで、テストで両者の一致を検証している。
-
-セクション見出しのアイコンは、[Anthropic の公式プレスキット](https://www.anthropic.com/press-kit)で配布されている Claude アイコンと、[OpenAI の公式 ChatGPT アプリ](https://chatgpt.com/download/)の製品アイコンを使用している。Claude、ChatGPT、Codex、および各ロゴは各社の商標であり、本ツールが両社から承認・後援を受けていることを示すものではない。
-
-Tk 9.0 を前提にしている。`/usr/bin/python3` の Tk 8.5 は Apple の古いビルドなので、GUI 版は mise の Python で動かすこと。端末版は従来どおり Python 3.9 以上であれば動く。
+- Claude は Claude Code が保存した認証情報を読み、非公式の使用量 API にアクセスします。公式ツールではなく、仕様変更などで動かなくなる可能性があります。認証エラー時は Claude Code で再ログインしてください。
+- Codex は `~/.codex/sessions/`（`CODEX_HOME` 指定時はその配下）の記録を読むだけです。更新ボタンは記録の再読込で、使用量の値自体は Codex が応答を受け取ったときに更新されます。アカウント切替後に古い記録が表示される場合もあります。
+- 片方が未設定でも、もう片方の取得は続きます。取得失敗中は最後に取得できた値を表示します。
 
 ## テスト
 
@@ -65,36 +44,6 @@ Tk 9.0 を前提にしている。`/usr/bin/python3` の Tk 8.5 は Apple の古
 mise exec -- python -m unittest discover -s tests -t .
 ```
 
-ネットワーク、Keychain、Codex のセッション記録は mock または一時ファイルを使うため、実トークンも通信も発生しない。
+テストは実際の認証情報・セッション記録を使わず、通信もしません。
 
-## 認証情報の扱い
-
-Claude Code が保存している OAuth アクセストークンを読み取り専用で使う。
-
-- macOS: Keychain（`security find-generic-password -s "Claude Code-credentials" -w`）
-- それ以外: `~/.claude/.credentials.json`
-
-- トークンは起動時に一度だけ読み、`TokenStore` の内部に閉じ込める。値を返す getter は持たない
-- 再読み込みは 401 を受けたときと期限切れのときだけ。リフレッシュは実装しない
-- 期限切れなら「Claude Code を一度起動してください」と表示して待機する。待機中は API を叩かず、Keychain の再読み込みだけを続けて新しいトークンが入るのを待つ
-- 例外は `UsageError` / `CredentialsError` に詰め替え、`raise ... from None` でチェーンを切る。メッセージにトークンもリクエストヘッダも載せない
-- 通信先は `api.anthropic.com` のみ
-
-## API
-
-非公式エンドポイント `GET https://api.anthropic.com/api/oauth/usage`。必要なヘッダは `Authorization: Bearer <token>` のみ（実測。`anthropic-beta` / `anthropic-version` / `Accept` はいずれも不要）。
-
-枠の一覧は `limits[]` を正とする。`kind` は `session` / `weekly_all` / `weekly_scoped`（`scope.model.display_name` にモデル名）。`limits` が無い応答では `five_hour` / `seven_day` / `seven_day_*` の固定キーにフォールバックする。未知のキーや未知の `kind` が来ても落ちない。
-
-## 未確認
-
-すべて非公式仕様のため、以下は実物で確認できていない。
-
-- 429 の制限の仕組み。単一プロセスでは 60 秒間隔でも 429 になり、成功はおよそ 4 分に 1 回だった。容量 2 程度のトークンバケットと推定しているが未確認。同じ OAuth トークンを使う Claude Code のトラフィックと枠を共有しているかも未確認（429 は `Retry-After: 0` を返し、`RateLimit-*` ヘッダは無い）
-- 5xx / 401 時のレスポンス形式
-- `severity` の取りうる値（観測できたのは `normal` のみ）
-- `is_active` の意味
-- `percent` / `utilization` が 100 を超えうるか
-- `locked_reason` の型と値（観測時はすべて null）
-- `nimbus_quill` など意味不明なトップレベルキーの用途
-- `~/.claude/.credentials.json` の構造（macOS では存在しないため Keychain 版と同形かは未検証）
+MIT License。Anthropic / OpenAI とは関係のない個人プロジェクトです。

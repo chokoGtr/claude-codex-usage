@@ -9,7 +9,6 @@
 import argparse
 import collections
 import datetime
-import os
 import queue
 import sys
 import threading
@@ -30,11 +29,8 @@ SECTION_GAP = 24
 BAR_HEIGHT = 8
 DOT_RADIUS = 3
 LABEL_INDENT = 12
-ICON_SIZE = 32
-ICON_GAP = 10
 DRAIN_INTERVAL_MS = 200
 TICK_INTERVAL_MS = 30000
-ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 LIGHT = {
     "dim": "#86868b",
@@ -154,13 +150,6 @@ class UsageWindow(object):
         self.font_small = tkfont.Font(font="TkDefaultFont")
         self.font_small.configure(size=max(base - 1, 8))
 
-        # PhotoImage は参照が切れると Canvas から消えるため、ウィンドウと同じ
-        # 寿命で保持する。素材は原本から表示サイズへ高品質に縮小済み。
-        self.icons = {
-            "claude": tk.PhotoImage(master=root, file=os.path.join(ASSET_DIR, "claude.png")),
-            "codex": tk.PhotoImage(master=root, file=os.path.join(ASSET_DIR, "codex.png")),
-        }
-
         root.title(WINDOW_TITLE)
         root.minsize(*MIN_SIZE)
         root.geometry("%dx%d" % (DEFAULT_WIDTH, MIN_SIZE[1]))
@@ -277,14 +266,11 @@ class UsageWindow(object):
         self._fit_height(signature, y + PAD_BOTTOM)
 
     def _draw_source(self, canvas, name, source, y, width, palette):
-        icon = self.icons[name]
-        canvas.create_image(PAD_X, y, image=icon, anchor="nw")
-        title_y = y + max((ICON_SIZE - self.font_title.metrics("linespace")) / 2.0, 0)
         canvas.create_text(
-            PAD_X + ICON_SIZE + ICON_GAP, title_y, text=source["title"],
+            PAD_X, y, text=source["title"],
             anchor="nw", fill=palette["fg"], font=self.font_title,
         )
-        y += max(ICON_SIZE, self.font_title.metrics("linespace")) + 12
+        y += self.font_title.metrics("linespace") + 12
 
         if not source["windows"]:
             message = "取得中…" if source["error"] is None else "表示できる枠がありません"
@@ -296,7 +282,8 @@ class UsageWindow(object):
             y = self._draw_row(canvas, window, y, width, palette, text, column)
 
         y += 2
-        stamp = "未取得" if source["last_ok_at"] is None else "最終更新 " + source["last_ok_at"].strftime("%H:%M:%S")
+        stamp_label = "最終読込 " if name == "codex" else "最終更新 "
+        stamp = "未取得" if source["last_ok_at"] is None else stamp_label + source["last_ok_at"].strftime("%H:%M:%S")
         icon = "↻"
         icon_color = palette["dim"] if source["refreshing"] else palette["fg"]
         tag = "refresh_" + name

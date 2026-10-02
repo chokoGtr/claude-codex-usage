@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """GUI 版のうち tkinter に依存しない部分のテスト。ウィンドウは開かない。"""
 
-import os
-import struct
 import unittest
 from unittest import mock
 
@@ -10,16 +8,6 @@ import claude_usage as cu
 import claude_codex_usage_gui as gui
 
 SAMPLE = {"limits": [{"kind": "session", "percent": 40, "resets_at": None, "is_active": False}]}
-
-
-class IconAssetTest(unittest.TestCase):
-    def test_official_product_icons_are_bundled_at_render_resolution(self):
-        for name in ("claude", "codex"):
-            path = os.path.join(gui.ASSET_DIR, name + ".png")
-            with open(path, "rb") as image:
-                header = image.read(24)
-            self.assertEqual(header[:8], b"\x89PNG\r\n\x1a\n")
-            self.assertEqual(struct.unpack(">II", header[16:24]), (32, 32))
 
 
 class Recorder(object):
