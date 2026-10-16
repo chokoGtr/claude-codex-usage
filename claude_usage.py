@@ -10,7 +10,7 @@ Claude Code が保存している OAuth アクセストークンで叩く。
 import argparse
 import collections
 import datetime
-import fcntl
+import getpass
 import json
 import os
 import platform
@@ -24,10 +24,20 @@ import unicodedata
 import urllib.error
 import urllib.request
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
 API_URL = "https://api.anthropic.com/api/oauth/usage"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
-CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
-LOCK_PATH = os.path.join(tempfile.gettempdir(), "claude-codex-usage-%d.lock" % os.getuid())
+CLAUDE_CONFIG_DIR = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude"))
+CREDENTIALS_PATH = os.path.join(CLAUDE_CONFIG_DIR, ".credentials.json")
+LOCK_PATH = os.path.join(
+    tempfile.gettempdir(),
+    "claude-codex-usage-%s.lock" % (os.getuid() if hasattr(os, "getuid") else getpass.getuser()),
+)
 
 HTTP_TIMEOUT = 20
 MIN_INTERVAL = 120
@@ -121,7 +131,7 @@ def _read_credentials_file():
         with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
             return f.read()
     except OSError:
-        raise CredentialsError("~/.claude/.credentials.json を読めません") from None
+        raise CredentialsError("%s を読めません" % CREDENTIALS_PATH) from None
 
 
 class TokenStore(object):
@@ -530,7 +540,11 @@ def acquire_lock(path=None):
     except OSError:
         raise LockError("ロックファイルを作れません") from None
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
         handle.close()
         raise LockError("claude-codex-usage は既に起動しています") from None

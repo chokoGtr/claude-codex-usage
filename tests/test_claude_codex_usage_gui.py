@@ -216,5 +216,28 @@ class BarColorTest(unittest.TestCase):
             self.assertEqual(gui.bar_color(percent, palette), expected, percent)
 
 
+class WslLaunchTest(unittest.TestCase):
+    def test_no_windows_python_outside_wsl(self):
+        with mock.patch.object(gui.platform, "system", return_value="Darwin"):
+            with mock.patch.object(gui.shutil, "which", return_value="/x/pythonw.exe") as which:
+                self.assertIsNone(gui.find_windows_python())
+        which.assert_not_called()
+
+    def test_finds_windows_python_on_wsl(self):
+        with mock.patch.object(gui.platform, "system", return_value="Linux"):
+            with mock.patch.object(gui.platform, "release", return_value="5.15.153.1-microsoft-standard-WSL2"):
+                with mock.patch.object(gui.shutil, "which", side_effect=lambda name: "/c/" + name if name == "python.exe" else None):
+                    self.assertEqual(gui.find_windows_python(), "/c/python.exe")
+
+    def test_plain_linux_is_not_wsl(self):
+        with mock.patch.object(gui.platform, "system", return_value="Linux"):
+            with mock.patch.object(gui.platform, "release", return_value="6.8.0-45-generic"):
+                self.assertFalse(gui.is_wsl())
+
+    def test_dark_mode_defaults_to_light_without_winreg(self):
+        with mock.patch.dict("sys.modules", {"winreg": None}):
+            self.assertFalse(gui.windows_dark_mode())
+
+
 if __name__ == "__main__":
     unittest.main()

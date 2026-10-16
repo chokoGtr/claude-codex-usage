@@ -270,6 +270,15 @@ class TokenStoreTest(unittest.TestCase):
         self.assertEqual(run.call_args[0][0][:3], ["security", "find-generic-password", "-s"])
         self.assertIn("-w", run.call_args[0][0])
 
+    def test_credentials_file_outside_macos(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, ".credentials.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(credentials(), f)
+            with mock.patch.object(cu.platform, "system", return_value="Linux"):
+                with mock.patch.object(cu, "CREDENTIALS_PATH", path):
+                    self.assertEqual(cu.read_credentials(), credentials())
+
 
 class HttpTest(unittest.TestCase):
     def test_only_anthropic_host_and_bearer_header(self):
