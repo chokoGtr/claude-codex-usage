@@ -350,6 +350,53 @@ class AccountTest(unittest.TestCase):
         with self.assertRaises(argparse.ArgumentTypeError):
             cu.parse_account("a=")
 
+    def _home(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        default = os.path.join(tmp.name, ".claude")
+        for name in (".claude", ".claude-work", ".claude-old", ".claude-empty"):
+            os.mkdir(os.path.join(tmp.name, name))
+        open(os.path.join(tmp.name, ".claude-file"), "w").close()
+        for name in (".claude", ".claude-work", ".claude-old"):
+            with open(os.path.join(tmp.name, name, ".credentials.json"), "w") as f:
+                f.write("{}")
+        return tmp.name, default
+
+    def test_discovers_logged_in_dirs(self):
+        home, default = self._home()
+        with mock.patch.object(cu.platform, "system", return_value="Linux"):
+            with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", default), mock.patch.object(cu, "ENV_CONFIG_DIR", None):
+                accounts = cu.discover_accounts()
+        self.assertEqual(
+            accounts,
+            [cu.Account("", default), cu.Account("old", default + "-old"), cu.Account("work", default + "-work")],
+        )
+
+    def test_env_config_dir_disables_discovery(self):
+        home, default = self._home()
+        with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", default), mock.patch.object(cu, "ENV_CONFIG_DIR", "/x"):
+            self.assertEqual(cu.discover_accounts(), [cu.Account("", None)])
+
+    def test_falls_back_to_default_when_nothing_found(self):
+        with tempfile.TemporaryDirectory() as home:
+            default = os.path.join(home, ".claude")
+            with mock.patch.object(cu.platform, "system", return_value="Linux"):
+                with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", default), mock.patch.object(cu, "ENV_CONFIG_DIR", None):
+                    self.assertEqual(cu.discover_accounts(), [cu.Account("", None)])
+
+    def test_keychain_check_does_not_read_secret(self):
+        found = mock.Mock(returncode=0)
+        with mock.patch.object(cu.platform, "system", return_value="Darwin"):
+            with mock.patch.object(cu.subprocess, "run", return_value=found) as run:
+                self.assertTrue(cu.has_credentials("/x/.claude-work"))
+        self.assertNotIn("-w", run.call_args[0][0])
+
+    def test_keychain_check_not_found(self):
+        missing = mock.Mock(returncode=cu.KEYCHAIN_NOT_FOUND)
+        with mock.patch.object(cu.platform, "system", return_value="Darwin"):
+            with mock.patch.object(cu.subprocess, "run", return_value=missing):
+                self.assertFalse(cu.has_credentials("/x/.claude-work"))
+
     def test_poller_reads_its_own_dir(self):
         with mock.patch.object(cu, "read_credentials", return_value=credentials()) as read:
             with mock.patch.object(cu, "_http_get_usage", return_value=SAMPLE):

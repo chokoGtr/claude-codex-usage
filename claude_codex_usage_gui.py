@@ -505,14 +505,14 @@ def main(argv=None):
         action="append",
         type=cu.parse_account,
         metavar="[名前=]DIR",
-        help="表示する Claude の設定ディレクトリ。複数指定で複数アカウントを並べる（既定は CLAUDE_CONFIG_DIR）",
+        help="表示する Claude の設定ディレクトリ。複数指定可。省略時は ~/.claude と ~/.claude-* のログイン済みのもの",
     )
     parser.add_argument("--topmost", action="store_true", help="ウィンドウを常に手前に表示する")
     parser.add_argument("--wslg", action="store_true", help="WSL でも Windows の Python を使わず WSLg で表示する")
     # WSL 側から起動された Windows 側の窓。ロックは WSL 側が持ち、stdin が閉じたら終了する
     parser.add_argument("--from-wsl", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    accounts = args.claude or [cu.Account("", None)]
+    accounts = args.claude or cu.discover_accounts()
 
     windows_python = None if args.wslg else find_windows_python()
     if args.from_wsl:

@@ -11,6 +11,7 @@ import argparse
 import collections
 import datetime
 import getpass
+import glob
 import hashlib
 import json
 import os
@@ -186,6 +187,36 @@ def parse_account(text):
     if not path:
         raise argparse.ArgumentTypeError("ディレクトリを指定してください")
     return Account(name.strip() or account_name(path), path)
+
+
+def has_credentials(config_dir):
+    """ログイン済みかどうかだけを見る。macOS でも認証情報の中身は読まない。"""
+    if platform.system() != "Darwin":
+        return os.path.isfile(os.path.join(config_dir, ".credentials.json"))
+    for service in keychain_services(config_dir):
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", service],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if result.returncode == 0:
+            return True
+    return False
+
+
+def discover_accounts():
+    """CLAUDE_CONFIG_DIR 指定時はそれだけ。無ければ ~/.claude と ~/.claude-* のうちログイン済みのもの。"""
+    if ENV_CONFIG_DIR is not None:
+        return [Account("", None)]
+    dirs = [DEFAULT_CONFIG_DIR] + sorted(
+        path for path in glob.glob(glob.escape(DEFAULT_CONFIG_DIR) + "-*") if os.path.isdir(path)
+    )
+    accounts = [Account(account_name(path), path) for path in dirs if has_credentials(path)]
+    return accounts or [Account("", None)]
 
 
 class TokenStore(object):
