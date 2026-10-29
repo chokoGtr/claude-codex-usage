@@ -203,6 +203,24 @@ class ClaudeAccountsTest(unittest.TestCase):
         )
 
 
+class ScrollTest(unittest.TestCase):
+    def test_wheel_tk9_notches(self):
+        self.assertEqual(gui.wheel_steps(120), -1)
+        self.assertEqual(gui.wheel_steps(-360), 3)
+
+    def test_wheel_small_deltas(self):
+        self.assertEqual(gui.wheel_steps(2), -2)
+        self.assertEqual(gui.wheel_steps(-1), 1)
+        self.assertEqual(gui.wheel_steps(0.5), -1)
+        self.assertEqual(gui.wheel_steps(0), 0)
+
+    def test_touchpad_delta_matches_tk(self):
+        # tk::PreciseScrollDeltas: 上位 16 ビットが X、下位 16 ビットが符号付きの Y
+        self.assertEqual(gui.touchpad_delta_y((3 << 16) | 5), 5)
+        self.assertEqual(gui.touchpad_delta_y((3 << 16) | 0xFFFB), -5)
+        self.assertEqual(gui.touchpad_delta_y(-1), -1)
+
+
 class PaletteTest(unittest.TestCase):
     def test_dark_background(self):
         self.assertEqual(gui.palette_for((12850, 12850, 12850))["track"], gui.DARK["track"])
