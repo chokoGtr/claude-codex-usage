@@ -42,7 +42,7 @@ Python / Tk が揃っていれば `python3 claude_codex_usage_gui.py` でも起�
 - `--topmost`: GUI を常に手前に表示。
 - `--wslg`: WSL で Windows の Python を使わず WSLg で表示。
 - `--claude [名前=]DIR`: GUI に表示する Claude の設定ディレクトリ。繰り返し指定できます。省略時は自動で探します（下記）。
-- GUI の ↻ または `Command-R` / `Ctrl-R` で手動更新。端末版は `Ctrl+C` で終了。
+- GUI は各見出し右の ↻ でそのアカウントだけ、右上の「↻ すべて更新」または `Command-R` / `Ctrl-R` で全部を手動更新。端末版は `Ctrl+C` で終了。
 - 端末版と GUI 版は合わせて 1 つだけ起動できます。
 
 ### 複数の Claude アカウント

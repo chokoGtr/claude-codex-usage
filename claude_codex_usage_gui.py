@@ -361,7 +361,7 @@ class UsageWindow(object):
             pass
 
         width = canvas.winfo_width() or self.px(DEFAULT_WIDTH)
-        y = self.px(PAD_TOP)
+        y = self._draw_refresh_all(canvas, self.px(PAD_TOP), width, palette)
         for index, (name, source) in enumerate(self.sources.items()):
             if index:
                 y += self.px(SECTION_GAP)
@@ -374,6 +374,22 @@ class UsageWindow(object):
             (len(s["windows"]), bool(s["error"])) for s in self.sources.values()
         )
         self._fit_height(signature, height)
+
+    def _draw_refresh_all(self, canvas, y, width, palette):
+        """右上に「↻ すべて更新」を置く。キーボードの更新と同じ動き。"""
+        busy = all(source["refreshing"] for source in self.sources.values())
+        shortcut = "⌘R" if self.windowing == "aqua" else "Ctrl+R"
+        right = width - self.px(PAD_X)
+        center = y + self.font_label.metrics("linespace") / 2.0
+        hint = canvas.create_text(
+            right, center, text=shortcut, anchor="e", fill=palette["dim"], font=self.font_small, tags=("refresh_all",),
+        )
+        canvas.create_text(
+            canvas.bbox(hint)[0] - self.px(6), center, text="↻ すべて更新", anchor="e",
+            fill=palette["dim"] if busy else palette["fg"], font=self.font_label, tags=("refresh_all",),
+        )
+        canvas.tag_bind("refresh_all", "<Button-1>", self.refresh)
+        return y + self.font_label.metrics("linespace") + self.px(TITLE_GAP)
 
     def _draw_source(self, canvas, name, source, y, width, palette):
         canvas.create_text(
