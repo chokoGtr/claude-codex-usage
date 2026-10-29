@@ -41,7 +41,7 @@ Python / Tk が揃っていれば `python3 claude_codex_usage_gui.py` でも起�
 - `--interval 300`: 更新間隔（秒、既定 300、下限 120）。
 - `--topmost`: GUI を常に手前に表示。
 - `--wslg`: WSL で Windows の Python を使わず WSLg で表示。
-- `--claude [名前=]DIR`: GUI に表示する Claude の設定ディレクトリ。繰り返し指定できます。省略時は自動で探します（下記）。
+- `--claude [名前=]DIR`: 表示する Claude の設定ディレクトリ（GUI・端末版とも）。繰り返し指定できます。省略時は自動で探します（下記）。
 - GUI は各見出し右の ↻ でそのアカウントだけ、右上の「↻ すべて更新」または `Command-R` / `Ctrl-R` で全部を手動更新。端末版は `Ctrl+C` で終了。
 - 端末版と GUI 版は合わせて 1 つだけ起動できます。
 
@@ -53,12 +53,13 @@ Claude Code はアカウントごとに設定ディレクトリを分けてロ�
 CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude   # 起動後 /login
 ```
 
-GUI は `--claude` を省くと、`~/.claude` と `~/.claude-*` のうちログイン済みのものを並べます。名前は `.claude-work` なら `work` です。`CLAUDE_CONFIG_DIR` を指定しているときは、自動では探さずそのディレクトリだけを表示します。
+GUI・端末版とも、`--claude` を省くと`~/.claude` と `~/.claude-*` のうちログイン済みのものを並べます。名前は `.claude-work` なら `work` です。`CLAUDE_CONFIG_DIR` を指定しているときは、自動では探さずそのディレクトリだけを表示します。
 
 表示するアカウントや名前を決めたいときは `--claude` で指定します。
 
 ```sh
 python3 claude_codex_usage_gui.py --claude 個人=~/.claude --claude ~/.claude-work
+python3 claude_usage.py --claude 個人=~/.claude --claude ~/.claude-work   # 端末版
 ```
 
 このツールはトークンを更新しないため、しばらく Claude Code で使っていないアカウントは期限切れと表示されます。そのアカウントで Claude Code を一度起動すると戻ります。

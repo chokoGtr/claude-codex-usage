@@ -189,6 +189,10 @@ def parse_account(text):
     return Account(name.strip() or account_name(path), path)
 
 
+def account_title(account):
+    return "Claude · %s" % account.name if account.name else "Claude Usage"
+
+
 def has_credentials(config_dir):
     """ログイン済みかどうかだけを見る。macOS でも認証情報の中身は読まない。"""
     if platform.system() != "Darwin":
@@ -497,8 +501,11 @@ def _truncate(text, width):
     return result + "…"
 
 
-def render_lines(windows, last_ok_at, error, term_width, now=None, tz=None):
-    lines = [" " + ESC_BOLD + "Claude Usage" + ESC_RESET, ""]
+def render_lines(windows, last_ok_at, error, term_width, now=None, tz=None, title="Claude Usage"):
+    """1 アカウント分。複数並べても端末に収まるよう、見出しと最終更新を 1 行にまとめる。"""
+    stamp = "未取得" if last_ok_at is None else "最終更新 " + last_ok_at.strftime("%H:%M:%S")
+    title = _truncate(title, max(term_width - display_width(stamp) - 4, 8))
+    lines = [" " + ESC_BOLD + title + ESC_RESET + "  " + ESC_DIM + stamp + ESC_RESET]
 
     labels = [_truncate(w.label, MAX_LABEL_WIDTH) for w in windows]
     label_width = max([display_width(x) for x in labels] + [0])
@@ -525,11 +532,6 @@ def render_lines(windows, last_ok_at, error, term_width, now=None, tz=None):
             line += " ←"
         lines.append(line)
 
-    lines.append("")
-    if last_ok_at is None:
-        lines.append(" " + ESC_DIM + "未取得" + ESC_RESET)
-    else:
-        lines.append(" " + ESC_DIM + "最終更新 " + last_ok_at.strftime("%H:%M:%S") + ESC_RESET)
     if error:
         lines.append(" " + ESC_YELLOW + "取得失敗: " + error + "（表示は最終取得値）" + ESC_RESET)
     return lines
@@ -590,34 +592,58 @@ class Poller(object):
         self._store = None
 
 
-def run(interval, stream, poller=None, sleep=time.sleep):
-    poller = poller or Poller()
-    windows = []
-    last_ok_at = None
-    error = None
-    failures = 0
+class AccountState(object):
+    """1 アカウント分の表示値と、次に取得する時刻。失敗時の待ち時間はアカウントごとに伸ばす。"""
 
-    while True:
+    def __init__(self, title, poller):
+        self.title = title
+        self.poller = poller
+        self.windows = []
+        self.last_ok_at = None
+        self.error = None
+        self.failures = 0
+        self.due = 0.0
+
+    def poll(self, interval, now):
         retry_after = None
         rate_limited = False
         try:
-            windows = extract_windows(poller.poll())
-            last_ok_at = datetime.datetime.now()
-            error = None
-            failures = 0
+            self.windows = extract_windows(self.poller.poll())
+            self.last_ok_at = datetime.datetime.now()
+            self.error = None
+            self.failures = 0
         except CredentialsError as exc:
-            poller.invalidate()
-            error = str(exc)
-            failures += 1
+            self.poller.invalidate()
+            self.error = str(exc)
+            self.failures += 1
         except UsageError as exc:
-            error = str(exc)
+            self.error = str(exc)
             retry_after = exc.retry_after
             rate_limited = exc.status == 429
-            failures += 1
+            self.failures += 1
+        self.due = now + backoff_delay(interval, self.failures, retry_after, rate_limited)
+
+
+def run(interval, stream, poller=None, sleep=time.sleep, accounts=None, clock=time.monotonic):
+    if poller is not None:
+        states = [AccountState("Claude Usage", poller)]
+    else:
+        states = [AccountState(account_title(a), Poller(a.config_dir)) for a in accounts or [Account("", None)]]
+
+    while True:
+        now = clock()
+        for state in states:
+            if state.due <= now:
+                state.poll(interval, now)
 
         term_width = shutil.get_terminal_size((80, 24)).columns
-        draw(stream, render_lines(windows, last_ok_at, error, term_width))
-        sleep(backoff_delay(interval, failures, retry_after, rate_limited))
+        lines = []
+        for state in states:
+            if lines:
+                lines.append("")
+            lines += render_lines(state.windows, state.last_ok_at, state.error, term_width, title=state.title)
+        draw(stream, lines)
+        sleep(max(min(state.due for state in states) - now, 0))
 
 
 def acquire_lock(path=None):
@@ -660,6 +686,13 @@ def main(argv=None):
         default=DEFAULT_INTERVAL,
         help="ポーリング間隔（秒、下限 %d、既定 %d）" % (MIN_INTERVAL, DEFAULT_INTERVAL),
     )
+    parser.add_argument(
+        "--claude",
+        action="append",
+        type=parse_account,
+        metavar="[名前=]DIR",
+        help="表示する Claude の設定ディレクトリ。複数指定可。省略時は ~/.claude と ~/.claude-* のログイン済みのもの",
+    )
     args = parser.parse_args(argv)
     interval = max(args.interval, MIN_INTERVAL)
 
@@ -675,7 +708,7 @@ def main(argv=None):
         stream.write(ESC_ALT_ON + ESC_HIDE_CURSOR)
         stream.flush()
         try:
-            run(interval, stream)
+            run(interval, stream, accounts=args.claude or discover_accounts())
         except (KeyboardInterrupt, SystemExit):
             pass
         finally:

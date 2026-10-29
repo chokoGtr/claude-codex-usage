@@ -167,18 +167,13 @@ def bar_color(percent, palette):
 # --- ウィンドウ -----------------------------------------------------------
 
 
-def claude_title(account):
-    return "Claude · %s" % account.name if account.name else "Claude Usage"
-
-
-
 class UsageWindow(object):
     def __init__(self, root, interval, topmost=False, accounts=None):
         self.root = root
         accounts = accounts or [cu.Account("", None)]
         self.sources = collections.OrderedDict()
         for index, account in enumerate(accounts):
-            self.sources["claude%d" % index] = self._source(claude_title(account))
+            self.sources["claude%d" % index] = self._source(cu.account_title(account))
         self.sources["codex"] = self._source("Codex Usage")
         self.row_count = None
         self.content_height = None

@@ -184,8 +184,8 @@ class UsageWindowRefreshTest(unittest.TestCase):
 
 class ClaudeAccountsTest(unittest.TestCase):
     def test_title(self):
-        self.assertEqual(gui.claude_title(cu.Account("", None)), "Claude Usage")
-        self.assertEqual(gui.claude_title(cu.Account("work", "/x")), "Claude · work")
+        self.assertEqual(cu.account_title(cu.Account("", None)), "Claude Usage")
+        self.assertEqual(cu.account_title(cu.Account("work", "/x")), "Claude · work")
 
     def test_accounts_are_passed_to_windows_side(self):
         args = gui.argparse.Namespace(interval=300, topmost=False)
