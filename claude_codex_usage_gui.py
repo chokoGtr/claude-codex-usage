@@ -150,13 +150,19 @@ def bar_color(percent, palette):
 # --- ウィンドウ -----------------------------------------------------------
 
 
+def claude_title(account):
+    return "Claude · %s" % account.name if account.name else "Claude Usage"
+
+
+
 class UsageWindow(object):
-    def __init__(self, root, interval, topmost=False):
+    def __init__(self, root, interval, topmost=False, accounts=None):
         self.root = root
-        self.sources = {
-            "claude": self._source("Claude Usage"),
-            "codex": self._source("Codex Usage"),
-        }
+        accounts = accounts or [cu.Account("", None)]
+        self.sources = collections.OrderedDict()
+        for index, account in enumerate(accounts):
+            self.sources["claude%d" % index] = self._source(claude_title(account))
+        self.sources["codex"] = self._source("Codex Usage")
         self.row_count = None
         self.windowing = root.tk.call("tk", "windowingsystem")
         self.dark = self.windowing == "win32" and windows_dark_mode()
@@ -197,7 +203,11 @@ class UsageWindow(object):
             self._use_dark_title_bar()
 
         self.queue = queue.Queue()
-        self._start_source("claude", cu.Poller(), interval, cu.extract_windows, cu.CredentialsError, cu.UsageError)
+        for index, account in enumerate(accounts):
+            self._start_source(
+                "claude%d" % index, cu.Poller(account.config_dir), interval,
+                cu.extract_windows, cu.CredentialsError, cu.UsageError,
+            )
         self._start_source("codex", xu.Poller(), interval, xu.extract_windows, (), xu.CodexUsageError)
 
         self.root.after(DRAIN_INTERVAL_MS, self._drain)
@@ -444,16 +454,15 @@ def to_windows_path(path):
     return result.stdout.decode("utf-8").strip()
 
 
-def run_on_windows(python, args):
+def run_on_windows(python, args, accounts):
     """WSL の Tk は日本語や高 DPI の表示が崩れやすいので、Windows のネイティブ窓で表示する。
 
     認証情報とセッション記録は WSL 側のものを \\wsl.localhost 経由で読ませる。
     """
     env = dict(os.environ)
-    env["CLAUDE_CONFIG_DIR"] = to_windows_path(cu.CLAUDE_CONFIG_DIR)
     env["CODEX_HOME"] = to_windows_path(xu.CODEX_HOME)
     shared = [name for name in env.get("WSLENV", "").split(":") if name]
-    env["WSLENV"] = ":".join(shared + ["CLAUDE_CONFIG_DIR", "CODEX_HOME"])
+    env["WSLENV"] = ":".join(shared + ["CODEX_HOME"])
 
     command = [python]
     if os.path.basename(python) in ("py.exe", "pyw.exe"):
@@ -461,6 +470,8 @@ def run_on_windows(python, args):
     command += [to_windows_path(os.path.abspath(__file__)), "--interval", str(args.interval), "--from-wsl"]
     if args.topmost:
         command.append("--topmost")
+    for account in accounts:
+        command += ["--claude", "%s=%s" % (account.name, to_windows_path(account.config_dir or cu.CLAUDE_CONFIG_DIR))]
     child = subprocess.Popen(command, env=env, stdin=subprocess.PIPE)
     try:
         return child.wait()
@@ -489,11 +500,19 @@ def main(argv=None):
         default=cu.DEFAULT_INTERVAL,
         help="ポーリング間隔（秒、下限 %d、既定 %d）" % (cu.MIN_INTERVAL, cu.DEFAULT_INTERVAL),
     )
+    parser.add_argument(
+        "--claude",
+        action="append",
+        type=cu.parse_account,
+        metavar="[名前=]DIR",
+        help="表示する Claude の設定ディレクトリ。複数指定で複数アカウントを並べる（既定は CLAUDE_CONFIG_DIR）",
+    )
     parser.add_argument("--topmost", action="store_true", help="ウィンドウを常に手前に表示する")
     parser.add_argument("--wslg", action="store_true", help="WSL でも Windows の Python を使わず WSLg で表示する")
     # WSL 側から起動された Windows 側の窓。ロックは WSL 側が持ち、stdin が閉じたら終了する
     parser.add_argument("--from-wsl", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    accounts = args.claude or [cu.Account("", None)]
 
     windows_python = None if args.wslg else find_windows_python()
     if args.from_wsl:
@@ -507,10 +526,10 @@ def main(argv=None):
 
     with lock:
         if windows_python:
-            return run_on_windows(windows_python, args)
+            return run_on_windows(windows_python, args, accounts)
         enable_dpi_awareness()
         root = tk.Tk()
-        window = UsageWindow(root, max(args.interval, cu.MIN_INTERVAL), topmost=args.topmost)
+        window = UsageWindow(root, max(args.interval, cu.MIN_INTERVAL), topmost=args.topmost, accounts=accounts)
         if args.from_wsl:
             window.close_on_stdin_eof()
         root.mainloop()

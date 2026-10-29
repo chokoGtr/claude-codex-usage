@@ -11,6 +11,7 @@ import argparse
 import collections
 import datetime
 import getpass
+import hashlib
 import json
 import os
 import platform
@@ -32,8 +33,10 @@ except ImportError:  # Windows
 
 API_URL = "https://api.anthropic.com/api/oauth/usage"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
-CLAUDE_CONFIG_DIR = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude"))
-CREDENTIALS_PATH = os.path.join(CLAUDE_CONFIG_DIR, ".credentials.json")
+DEFAULT_CONFIG_DIR = os.path.expanduser("~/.claude")
+ENV_CONFIG_DIR = os.path.expanduser(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") else None
+CLAUDE_CONFIG_DIR = ENV_CONFIG_DIR or DEFAULT_CONFIG_DIR
+KEYCHAIN_NOT_FOUND = 44  # security コマンドの errSecItemNotFound
 LOCK_PATH = os.path.join(
     tempfile.gettempdir(),
     "claude-codex-usage-%s.lock" % (os.getuid() if hasattr(os, "getuid") else getpass.getuser()),
@@ -70,6 +73,9 @@ RESET_AT_WIDTH = 15
 WEEKDAYS = "月火水木金土日"
 
 
+Account = collections.namedtuple("Account", "name config_dir")
+
+
 class CredentialsError(Exception):
     """認証情報を読めなかった。メッセージにトークンは含めない。"""
 
@@ -94,12 +100,14 @@ class UsageError(Exception):
 # --- 認証情報 -------------------------------------------------------------
 
 
-def read_credentials():
-    """認証情報 JSON を読み取り専用で取得する。"""
+def read_credentials(config_dir=None):
+    """認証情報 JSON を読み取り専用で取得する。config_dir 省略時は CLAUDE_CONFIG_DIR に従う。"""
+    if config_dir is None:
+        config_dir = ENV_CONFIG_DIR
     if platform.system() == "Darwin":
-        raw = _read_keychain()
+        raw = _read_keychain(keychain_services(config_dir))
     else:
-        raw = _read_credentials_file()
+        raw = _read_credentials_file(os.path.join(config_dir or DEFAULT_CONFIG_DIR, ".credentials.json"))
     try:
         data = json.loads(raw)
     except ValueError:
@@ -109,41 +117,88 @@ def read_credentials():
     return data
 
 
-def _read_keychain():
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-        )
-    except OSError:
-        raise CredentialsError("security コマンドを実行できません") from None
-    except subprocess.SubprocessError:
-        raise CredentialsError("Keychain の読み取りがタイムアウトしました") from None
-    if result.returncode != 0:
-        raise CredentialsError("Keychain から認証情報を読めません（ロック中の可能性）")
-    return result.stdout.decode("utf-8", "replace")
+def keychain_services(config_dir):
+    """Keychain の項目名の候補。
+
+    Claude Code は CLAUDE_CONFIG_DIR を指定すると、そのパスの SHA-256 先頭 8 文字を付けた名前で保存する。
+    パスは指定された文字列のまま使われるため、末尾の / の有無も候補に入れる。
+    """
+    if config_dir is None:
+        return [KEYCHAIN_SERVICE]
+    paths = [config_dir]
+    trimmed = config_dir.rstrip("/")
+    if trimmed and trimmed != config_dir:
+        paths.append(trimmed)
+    services = [
+        "%s-%s" % (KEYCHAIN_SERVICE, hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]) for path in paths
+    ]
+    if trimmed == DEFAULT_CONFIG_DIR:
+        services.insert(0, KEYCHAIN_SERVICE)
+    return services
 
 
-def _read_credentials_file():
+def _read_keychain(services):
+    not_found = True
+    for service in services:
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", service, "-w"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except OSError:
+            raise CredentialsError("security コマンドを実行できません") from None
+        except subprocess.SubprocessError:
+            raise CredentialsError("Keychain の読み取りがタイムアウトしました") from None
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", "replace")
+        if result.returncode != KEYCHAIN_NOT_FOUND:
+            not_found = False
+    if not_found:
+        raise CredentialsError("Keychain に認証情報がありません（未ログインの可能性）")
+    raise CredentialsError("Keychain から認証情報を読めません（ロック中の可能性）")
+
+
+def _read_credentials_file(path):
     try:
-        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return f.read()
     except OSError:
-        raise CredentialsError("%s を読めません" % CREDENTIALS_PATH) from None
+        raise CredentialsError("%s を読めません" % path) from None
+
+
+def account_name(config_dir):
+    """~/.claude-work なら work。既定の ~/.claude は空文字。"""
+    # WSL から渡す Windows 形式のパスも扱えるよう、区切りは / と \ の両方を見る
+    base = config_dir.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lstrip(".")
+    if base.startswith("claude-"):
+        base = base[len("claude-"):]
+    return "" if base == "claude" else base
+
+
+def parse_account(text):
+    """`名前=ディレクトリ` または `ディレクトリ` を Account にする。名前を省くとディレクトリ名から付ける。"""
+    name, sep, path = text.partition("=")
+    if not sep:
+        name, path = "", text
+    path = os.path.expanduser(path.strip())
+    if not path:
+        raise argparse.ArgumentTypeError("ディレクトリを指定してください")
+    return Account(name.strip() or account_name(path), path)
 
 
 class TokenStore(object):
     """アクセストークンを内部に閉じ込める。値を返す getter は持たない。"""
 
-    def __init__(self):
+    def __init__(self, config_dir=None):
+        self._config_dir = config_dir
         self._token = None
         self._expires_at_ms = None
         self.load()
 
     def load(self):
-        oauth = read_credentials().get("claudeAiOauth")
+        oauth = read_credentials(self._config_dir).get("claudeAiOauth")
         if not isinstance(oauth, dict):
             raise CredentialsError("認証情報に claudeAiOauth がありません")
         token = oauth.get("accessToken")
@@ -474,12 +529,13 @@ def backoff_delay(interval, failures, retry_after=None, rate_limited=False):
 class Poller(object):
     """トークンの再読み込み条件（401 と期限切れ）だけを扱う。"""
 
-    def __init__(self):
+    def __init__(self, config_dir=None):
+        self._config_dir = config_dir
         self._store = None
 
     def poll(self):
         if self._store is None:
-            self._store = TokenStore()
+            self._store = TokenStore(self._config_dir)
         if self._store.is_expired():
             self._store.reload()
             if self._store.is_expired():

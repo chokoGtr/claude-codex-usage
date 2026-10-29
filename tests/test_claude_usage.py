@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """claude_usage の単体テスト。ネットワークと Keychain には触れない。"""
 
+import argparse
 import datetime
 import email.message
+import hashlib
 import io
 import re
 import json
@@ -276,8 +278,83 @@ class TokenStoreTest(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(credentials(), f)
             with mock.patch.object(cu.platform, "system", return_value="Linux"):
-                with mock.patch.object(cu, "CREDENTIALS_PATH", path):
+                self.assertEqual(cu.read_credentials(directory), credentials())
+
+    def test_default_uses_claude_config_dir_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, ".credentials.json"), "w", encoding="utf-8") as f:
+                json.dump(credentials(), f)
+            with mock.patch.object(cu.platform, "system", return_value="Linux"):
+                with mock.patch.object(cu, "ENV_CONFIG_DIR", directory):
                     self.assertEqual(cu.read_credentials(), credentials())
+
+
+class KeychainServiceTest(unittest.TestCase):
+    def test_default_has_no_suffix(self):
+        self.assertEqual(cu.keychain_services(None), ["Claude Code-credentials"])
+
+    def test_config_dir_uses_sha256_prefix(self):
+        # Claude Code が実際に作った項目名で確認した値
+        self.assertEqual(
+            cu.keychain_services("/Users/kaito/.claude-aureon"), ["Claude Code-credentials-fc95c454"]
+        )
+
+    def test_trailing_slash_is_also_tried(self):
+        self.assertEqual(
+            cu.keychain_services("/Users/kaito/.claude-aureon/"),
+            ["Claude Code-credentials-%s" % hashlib.sha256(b"/Users/kaito/.claude-aureon/").hexdigest()[:8],
+             "Claude Code-credentials-fc95c454"],
+        )
+
+    def test_explicit_default_dir_tries_unsuffixed_first(self):
+        with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", "/home/u/.claude"):
+            services = cu.keychain_services("/home/u/.claude")
+        self.assertEqual(services[0], "Claude Code-credentials")
+        self.assertEqual(len(services), 2)
+
+    def test_tries_candidates_in_order(self):
+        missing = mock.Mock(returncode=cu.KEYCHAIN_NOT_FOUND, stdout=b"")
+        found = mock.Mock(returncode=0, stdout=json.dumps(credentials()).encode())
+        with mock.patch.object(cu.platform, "system", return_value="Darwin"):
+            with mock.patch.object(cu.subprocess, "run", side_effect=[missing, found]) as run:
+                with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", "/home/u/.claude"):
+                    self.assertEqual(cu.read_credentials("/home/u/.claude"), credentials())
+                    expected = cu.keychain_services("/home/u/.claude")
+        self.assertEqual([c[0][0][3] for c in run.call_args_list], expected)
+
+    def test_not_found_says_not_logged_in(self):
+        missing = mock.Mock(returncode=cu.KEYCHAIN_NOT_FOUND, stdout=b"")
+        with mock.patch.object(cu.platform, "system", return_value="Darwin"):
+            with mock.patch.object(cu.subprocess, "run", return_value=missing):
+                with self.assertRaises(cu.CredentialsError) as caught:
+                    cu.read_credentials("/x/.claude-work")
+        self.assertIn("未ログイン", str(caught.exception))
+
+
+class AccountTest(unittest.TestCase):
+    def test_name_and_dir(self):
+        self.assertEqual(cu.parse_account("仕事=/x/.claude-work"), cu.Account("仕事", "/x/.claude-work"))
+
+    def test_name_from_directory(self):
+        self.assertEqual(cu.parse_account("/x/.claude-work/").name, "work")
+        self.assertEqual(cu.parse_account("/x/.claude").name, "")
+        self.assertEqual(cu.parse_account("=/x/.claude-work").name, "work")
+
+    def test_windows_path(self):
+        self.assertEqual(cu.account_name("\\\\wsl.localhost\\Ubuntu\\home\\u\\.claude-work"), "work")
+
+    def test_home_is_expanded(self):
+        self.assertEqual(cu.parse_account("a=~/.claude-a").config_dir, os.path.expanduser("~/.claude-a"))
+
+    def test_empty_dir_is_rejected(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            cu.parse_account("a=")
+
+    def test_poller_reads_its_own_dir(self):
+        with mock.patch.object(cu, "read_credentials", return_value=credentials()) as read:
+            with mock.patch.object(cu, "_http_get_usage", return_value=SAMPLE):
+                cu.Poller("/x/.claude-work").poll()
+        read.assert_called_once_with("/x/.claude-work")
 
 
 class HttpTest(unittest.TestCase):
