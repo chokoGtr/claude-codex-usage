@@ -182,6 +182,45 @@ class UsageWindowRefreshTest(unittest.TestCase):
         source["control"].request_refresh.assert_not_called()
 
 
+class ClaudeAccountsTest(unittest.TestCase):
+    def test_title(self):
+        self.assertEqual(cu.account_title(cu.Account("", None)), "Claude Usage")
+        self.assertEqual(cu.account_title(cu.Account("work", "/x")), "Claude · work")
+
+    def test_accounts_are_passed_to_windows_side(self):
+        args = gui.argparse.Namespace(interval=300, topmost=False)
+        accounts = [cu.Account("", None), cu.Account("work", "/home/u/.claude-work")]
+        child = mock.Mock()
+        child.wait.return_value = 0
+        with mock.patch.object(gui, "to_windows_path", side_effect=lambda path: "W:" + path):
+            with mock.patch.object(gui.cu, "CLAUDE_CONFIG_DIR", "/home/u/.claude"):
+                with mock.patch.object(gui.subprocess, "Popen", return_value=child) as popen:
+                    gui.run_on_windows("/c/pythonw.exe", args, accounts)
+        command = popen.call_args[0][0]
+        self.assertEqual(
+            [command[i + 1] for i, part in enumerate(command) if part == "--claude"],
+            ["=W:/home/u/.claude", "work=W:/home/u/.claude-work"],
+        )
+
+
+class ScrollTest(unittest.TestCase):
+    def test_wheel_tk9_notches(self):
+        self.assertEqual(gui.wheel_steps(120), -1)
+        self.assertEqual(gui.wheel_steps(-360), 3)
+
+    def test_wheel_small_deltas(self):
+        self.assertEqual(gui.wheel_steps(2), -2)
+        self.assertEqual(gui.wheel_steps(-1), 1)
+        self.assertEqual(gui.wheel_steps(0.5), -1)
+        self.assertEqual(gui.wheel_steps(0), 0)
+
+    def test_touchpad_delta_matches_tk(self):
+        # tk::PreciseScrollDeltas: 上位 16 ビットが X、下位 16 ビットが符号付きの Y
+        self.assertEqual(gui.touchpad_delta_y((3 << 16) | 5), 5)
+        self.assertEqual(gui.touchpad_delta_y((3 << 16) | 0xFFFB), -5)
+        self.assertEqual(gui.touchpad_delta_y(-1), -1)
+
+
 class PaletteTest(unittest.TestCase):
     def test_dark_background(self):
         self.assertEqual(gui.palette_for((12850, 12850, 12850))["track"], gui.DARK["track"])

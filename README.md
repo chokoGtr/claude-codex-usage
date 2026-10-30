@@ -41,12 +41,32 @@ Python / Tk が揃っていれば `python3 claude_codex_usage_gui.py` でも起�
 - `--interval 300`: 更新間隔（秒、既定 300、下限 120）。
 - `--topmost`: GUI を常に手前に表示。
 - `--wslg`: WSL で Windows の Python を使わず WSLg で表示。
-- GUI の ↻ または `Command-R` / `Ctrl-R` で手動更新。端末版は `Ctrl+C` で終了。
+- `--claude [名前=]DIR`: 表示する Claude の設定ディレクトリ（GUI・端末版とも）。繰り返し指定できます。省略時は自動で探します（下記）。
+- GUI は各見出し右の ↻ でそのアカウントだけ、右上の「↻ すべて更新」または `Command-R` / `Ctrl-R` で全部を手動更新。端末版は `Ctrl+C` で終了。
 - 端末版と GUI 版は合わせて 1 つだけ起動できます。
+
+### 複数の Claude アカウント
+
+Claude Code はアカウントごとに設定ディレクトリを分けてログインしておきます。
+
+```sh
+CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude   # 起動後 /login
+```
+
+GUI・端末版とも、`--claude` を省くと`~/.claude` と `~/.claude-*` のうちログイン済みのものを並べます。名前は `.claude-work` なら `work` です。`CLAUDE_CONFIG_DIR` を指定しているときは、自動では探さずそのディレクトリだけを表示します。
+
+表示するアカウントや名前を決めたいときは `--claude` で指定します。
+
+```sh
+python3 claude_codex_usage_gui.py --claude 個人=~/.claude --claude ~/.claude-work
+python3 claude_usage.py --claude 個人=~/.claude --claude ~/.claude-work   # 端末版
+```
+
+このツールはトークンを更新しないため、しばらく Claude Code で使っていないアカウントは期限切れと表示されます。そのアカウントで Claude Code を一度起動すると戻ります。
 
 ## 注意点
 
-- Claude は Claude Code が保存した認証情報（macOS は Keychain、それ以外は `~/.claude/.credentials.json`。`CLAUDE_CONFIG_DIR` 指定時はその配下）を読み、非公式の使用量 API にアクセスします。公式ツールではなく、仕様変更などで動かなくなる可能性があります。認証エラー時は Claude Code で再ログインしてください。
+- Claude は Claude Code が保存した認証情報（macOS は Keychain、それ以外は `~/.claude/.credentials.json`。`CLAUDE_CONFIG_DIR` や `--claude` 指定時はその配下。macOS ではパスから決まる名前の Keychain 項目）を読み、非公式の使用量 API にアクセスします。公式ツールではなく、仕様変更などで動かなくなる可能性があります。認証エラー時は Claude Code で再ログインしてください。
 - Codex は `~/.codex/sessions/`（`CODEX_HOME` 指定時はその配下）の記録を読むだけです。更新ボタンは記録の再読込で、使用量の値自体は Codex が応答を受け取ったときに更新されます。アカウント切替後に古い記録が表示される場合もあります。
 - 片方が未設定でも、もう片方の取得は続きます。取得失敗中は最後に取得できた値を表示します。
 

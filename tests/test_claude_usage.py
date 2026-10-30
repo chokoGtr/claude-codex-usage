@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """claude_usage の単体テスト。ネットワークと Keychain には触れない。"""
 
+import argparse
 import datetime
 import email.message
+import hashlib
 import io
 import re
 import json
@@ -276,8 +278,130 @@ class TokenStoreTest(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(credentials(), f)
             with mock.patch.object(cu.platform, "system", return_value="Linux"):
-                with mock.patch.object(cu, "CREDENTIALS_PATH", path):
+                self.assertEqual(cu.read_credentials(directory), credentials())
+
+    def test_default_uses_claude_config_dir_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, ".credentials.json"), "w", encoding="utf-8") as f:
+                json.dump(credentials(), f)
+            with mock.patch.object(cu.platform, "system", return_value="Linux"):
+                with mock.patch.object(cu, "ENV_CONFIG_DIR", directory):
                     self.assertEqual(cu.read_credentials(), credentials())
+
+
+class KeychainServiceTest(unittest.TestCase):
+    def test_default_has_no_suffix(self):
+        self.assertEqual(cu.keychain_services(None), ["Claude Code-credentials"])
+
+    def test_config_dir_uses_sha256_prefix(self):
+        # Claude Code が実際に作った項目名で確認した値
+        self.assertEqual(
+            cu.keychain_services("/Users/kaito/.claude-aureon"), ["Claude Code-credentials-fc95c454"]
+        )
+
+    def test_trailing_slash_is_also_tried(self):
+        self.assertEqual(
+            cu.keychain_services("/Users/kaito/.claude-aureon/"),
+            ["Claude Code-credentials-%s" % hashlib.sha256(b"/Users/kaito/.claude-aureon/").hexdigest()[:8],
+             "Claude Code-credentials-fc95c454"],
+        )
+
+    def test_explicit_default_dir_tries_unsuffixed_first(self):
+        with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", "/home/u/.claude"):
+            services = cu.keychain_services("/home/u/.claude")
+        self.assertEqual(services[0], "Claude Code-credentials")
+        self.assertEqual(len(services), 2)
+
+    def test_tries_candidates_in_order(self):
+        missing = mock.Mock(returncode=cu.KEYCHAIN_NOT_FOUND, stdout=b"")
+        found = mock.Mock(returncode=0, stdout=json.dumps(credentials()).encode())
+        with mock.patch.object(cu.platform, "system", return_value="Darwin"):
+            with mock.patch.object(cu.subprocess, "run", side_effect=[missing, found]) as run:
+                with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", "/home/u/.claude"):
+                    self.assertEqual(cu.read_credentials("/home/u/.claude"), credentials())
+                    expected = cu.keychain_services("/home/u/.claude")
+        self.assertEqual([c[0][0][3] for c in run.call_args_list], expected)
+
+    def test_not_found_says_not_logged_in(self):
+        missing = mock.Mock(returncode=cu.KEYCHAIN_NOT_FOUND, stdout=b"")
+        with mock.patch.object(cu.platform, "system", return_value="Darwin"):
+            with mock.patch.object(cu.subprocess, "run", return_value=missing):
+                with self.assertRaises(cu.CredentialsError) as caught:
+                    cu.read_credentials("/x/.claude-work")
+        self.assertIn("未ログイン", str(caught.exception))
+
+
+class AccountTest(unittest.TestCase):
+    def test_name_and_dir(self):
+        self.assertEqual(cu.parse_account("仕事=/x/.claude-work"), cu.Account("仕事", "/x/.claude-work"))
+
+    def test_name_from_directory(self):
+        self.assertEqual(cu.parse_account("/x/.claude-work/").name, "work")
+        self.assertEqual(cu.parse_account("/x/.claude").name, "")
+        self.assertEqual(cu.parse_account("=/x/.claude-work").name, "work")
+
+    def test_windows_path(self):
+        self.assertEqual(cu.account_name("\\\\wsl.localhost\\Ubuntu\\home\\u\\.claude-work"), "work")
+
+    def test_home_is_expanded(self):
+        self.assertEqual(cu.parse_account("a=~/.claude-a").config_dir, os.path.expanduser("~/.claude-a"))
+
+    def test_empty_dir_is_rejected(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            cu.parse_account("a=")
+
+    def _home(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        default = os.path.join(tmp.name, ".claude")
+        for name in (".claude", ".claude-work", ".claude-old", ".claude-empty"):
+            os.mkdir(os.path.join(tmp.name, name))
+        open(os.path.join(tmp.name, ".claude-file"), "w").close()
+        for name in (".claude", ".claude-work", ".claude-old"):
+            with open(os.path.join(tmp.name, name, ".credentials.json"), "w") as f:
+                f.write("{}")
+        return tmp.name, default
+
+    def test_discovers_logged_in_dirs(self):
+        home, default = self._home()
+        with mock.patch.object(cu.platform, "system", return_value="Linux"):
+            with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", default), mock.patch.object(cu, "ENV_CONFIG_DIR", None):
+                accounts = cu.discover_accounts()
+        self.assertEqual(
+            accounts,
+            [cu.Account("", default), cu.Account("old", default + "-old"), cu.Account("work", default + "-work")],
+        )
+
+    def test_env_config_dir_disables_discovery(self):
+        home, default = self._home()
+        with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", default), mock.patch.object(cu, "ENV_CONFIG_DIR", "/x"):
+            self.assertEqual(cu.discover_accounts(), [cu.Account("", None)])
+
+    def test_falls_back_to_default_when_nothing_found(self):
+        with tempfile.TemporaryDirectory() as home:
+            default = os.path.join(home, ".claude")
+            with mock.patch.object(cu.platform, "system", return_value="Linux"):
+                with mock.patch.object(cu, "DEFAULT_CONFIG_DIR", default), mock.patch.object(cu, "ENV_CONFIG_DIR", None):
+                    self.assertEqual(cu.discover_accounts(), [cu.Account("", None)])
+
+    def test_keychain_check_does_not_read_secret(self):
+        found = mock.Mock(returncode=0)
+        with mock.patch.object(cu.platform, "system", return_value="Darwin"):
+            with mock.patch.object(cu.subprocess, "run", return_value=found) as run:
+                self.assertTrue(cu.has_credentials("/x/.claude-work"))
+        self.assertNotIn("-w", run.call_args[0][0])
+
+    def test_keychain_check_not_found(self):
+        missing = mock.Mock(returncode=cu.KEYCHAIN_NOT_FOUND)
+        with mock.patch.object(cu.platform, "system", return_value="Darwin"):
+            with mock.patch.object(cu.subprocess, "run", return_value=missing):
+                self.assertFalse(cu.has_credentials("/x/.claude-work"))
+
+    def test_poller_reads_its_own_dir(self):
+        with mock.patch.object(cu, "read_credentials", return_value=credentials()) as read:
+            with mock.patch.object(cu, "_http_get_usage", return_value=SAMPLE):
+                cu.Poller("/x/.claude-work").poll()
+        read.assert_called_once_with("/x/.claude-work")
 
 
 class HttpTest(unittest.TestCase):
@@ -375,26 +499,26 @@ class RenderTest(unittest.TestCase):
 
     def test_active_marker_and_colors(self):
         windows = [cu.Window("週次 (Fable)", 96.0, None, True)]
-        line = cu.render_lines(windows, None, None, 80, self.NOW)[2]
+        line = cu.render_lines(windows, None, None, 80, self.NOW)[1]
         self.assertIn(cu.ESC_RED, line)
         self.assertTrue(line.rstrip().endswith("←"))
 
     def test_reset_at_shown_when_wide(self):
         windows = [cu.Window("5時間枠", 10.0, "2026-09-15T09:40:00+00:00", False)]
         jst = datetime.timezone(datetime.timedelta(hours=9))
-        line = _strip_ansi(cu.render_lines(windows, None, None, 80, self.NOW, jst)[2])
+        line = _strip_ansi(cu.render_lines(windows, None, None, 80, self.NOW, jst)[1])
         self.assertIn("2h 40m", line)
         self.assertIn("9/15(火) 18:40", line)
 
     def test_reset_at_dropped_when_narrow(self):
         windows = [cu.Window("5時間枠", 10.0, "2026-09-15T09:40:00+00:00", False)]
-        line = _strip_ansi(cu.render_lines(windows, None, None, 40, self.NOW)[2])
+        line = _strip_ansi(cu.render_lines(windows, None, None, 40, self.NOW)[1])
         self.assertIn("2h 40m", line)
         self.assertNotIn("(", line)
 
     def test_long_label_is_truncated(self):
         windows = [cu.Window("x" * 60, 10.0, None, False)]
-        line = _strip_ansi(cu.render_lines(windows, None, None, 80, self.NOW)[2])
+        line = _strip_ansi(cu.render_lines(windows, None, None, 80, self.NOW)[1])
         self.assertLessEqual(cu.display_width(line), 80)
         self.assertIn("…", line)
 
@@ -464,6 +588,19 @@ class PollerTest(unittest.TestCase):
         self.assertEqual(store.fetch_usage.call_count, 0)
 
 
+class FakeClock(object):
+    """sleep した分だけ進む時計。"""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 class RunLoopTest(unittest.TestCase):
     def test_keeps_last_values_while_failing(self):
         poller = mock.Mock()
@@ -471,13 +608,16 @@ class RunLoopTest(unittest.TestCase):
         delays = []
         stream = io.StringIO()
 
+        clock = FakeClock()
+
         def sleep(seconds):
+            clock.advance(seconds)
             delays.append(seconds)
             if len(delays) == 2:
                 raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            cu.run(60, stream, poller=poller, sleep=sleep)
+            cu.run(60, stream, poller=poller, sleep=sleep, clock=clock)
 
         text = _strip_ansi(stream.getvalue())
         self.assertIn("取得失敗: HTTP 500", text)
@@ -493,7 +633,7 @@ class RunLoopTest(unittest.TestCase):
             raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            cu.run(60, stream, poller=poller, sleep=sleep)
+            cu.run(60, stream, poller=poller, sleep=sleep, clock=FakeClock())
         self.assertEqual(poller.invalidate.call_count, 1)
         self.assertIn("取得失敗: 読めません", _strip_ansi(stream.getvalue()))
 
@@ -503,12 +643,15 @@ class RunLoopTest(unittest.TestCase):
         delays = []
         stream = io.StringIO()
 
+        clock = FakeClock()
+
         def sleep(seconds):
+            clock.advance(seconds)
             delays.append(seconds)
             raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            cu.run(60, stream, poller=poller, sleep=sleep)
+            cu.run(60, stream, poller=poller, sleep=sleep, clock=clock)
         self.assertEqual(delays, [200])
 
     def test_rate_limit_backs_off_beyond_normal_cap(self):
@@ -517,14 +660,66 @@ class RunLoopTest(unittest.TestCase):
         delays = []
         stream = io.StringIO()
 
+        clock = FakeClock()
+
         def sleep(seconds):
+            clock.advance(seconds)
             delays.append(seconds)
             if len(delays) == 4:
                 raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            cu.run(300, stream, poller=poller, sleep=sleep)
+            cu.run(300, stream, poller=poller, sleep=sleep, clock=clock)
         self.assertEqual(delays, [300, 600, 1200, 1800])
+
+
+class MultiAccountRunTest(unittest.TestCase):
+    def _run(self, pollers, sleeps, clock_values):
+        stream = io.StringIO()
+        delays = []
+        clock = iter(clock_values)
+
+        def sleep(seconds):
+            delays.append(seconds)
+            if len(delays) == sleeps:
+                raise KeyboardInterrupt
+
+        accounts = [cu.Account(name, "/x/" + name) for name in pollers]
+        with mock.patch.object(cu, "Poller", side_effect=lambda config_dir: pollers[config_dir.rsplit("/", 1)[1]]):
+            with self.assertRaises(KeyboardInterrupt):
+                cu.run(60, stream, accounts=accounts, sleep=sleep, clock=lambda: next(clock))
+        return _strip_ansi(stream.getvalue()), delays
+
+    def test_shows_each_account_with_its_own_error(self):
+        ok = mock.Mock()
+        ok.poll.return_value = SAMPLE
+        broken = mock.Mock()
+        broken.poll.side_effect = cu.UsageError(500, "HTTP 500")
+        text, delays = self._run({"work": ok, "home": broken}, 1, [0.0])
+        self.assertIn("Claude · work", text)
+        self.assertIn("Claude · home", text)
+        self.assertIn("週次 (Fable)", text)
+        self.assertEqual(text.count("取得失敗: HTTP 500"), 1)
+        self.assertEqual(delays, [60])
+
+    def test_backoff_is_per_account(self):
+        ok = mock.Mock()
+        ok.poll.return_value = SAMPLE
+        broken = mock.Mock()
+        broken.poll.side_effect = cu.UsageError(429, "HTTP 429", retry_after=200)
+        # 0 秒: 両方取得 → ok は 60 秒後、broken は 200 秒後
+        # 60 秒: ok だけ取得 → 次は 120 秒後
+        text, delays = self._run({"ok": ok, "broken": broken}, 2, [0.0, 60.0])
+        self.assertEqual(ok.poll.call_count, 2)
+        self.assertEqual(broken.poll.call_count, 1)
+        self.assertEqual(delays, [60, 60])
+
+    def test_fits_24_line_terminal_with_four_accounts(self):
+        poller = mock.Mock()
+        poller.poll.return_value = {"limits": SAMPLE["limits"][:2]}
+        pollers = {name: poller for name in ("a", "b", "c", "d")}
+        text, delays = self._run(pollers, 1, [0.0])
+        self.assertLessEqual(len(text.split(cu.ESC_HOME)[-1].strip("\n").splitlines()), 24)
 
 
 class LockTest(unittest.TestCase):
@@ -550,6 +745,9 @@ class CliTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         patcher = mock.patch.object(cu, "LOCK_PATH", os.path.join(tmp.name, "test.lock"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(cu, "discover_accounts", return_value=[cu.Account("", None)])
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -579,6 +777,30 @@ class CliTest(unittest.TestCase):
             with mock.patch.object(cu.sys, "stdout", io.StringIO()):
                 cu.main(["--interval", "5"])
         self.assertEqual(captured["interval"], cu.MIN_INTERVAL)
+
+    def test_accounts_are_passed_to_run(self):
+        captured = {}
+
+        def fake_run(interval, stream, **kwargs):
+            captured.update(kwargs)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(cu, "run", fake_run):
+            with mock.patch.object(cu.sys, "stdout", io.StringIO()):
+                cu.main(["--claude", "仕事=/x/.claude-work"])
+        self.assertEqual(captured["accounts"], [cu.Account("仕事", "/x/.claude-work")])
+
+    def test_discovers_accounts_by_default(self):
+        captured = {}
+
+        def fake_run(interval, stream, **kwargs):
+            captured.update(kwargs)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(cu, "run", fake_run):
+            with mock.patch.object(cu.sys, "stdout", io.StringIO()):
+                cu.main([])
+        self.assertEqual(captured["accounts"], [cu.Account("", None)])
 
     def test_terminal_is_restored(self):
         stream = io.StringIO()

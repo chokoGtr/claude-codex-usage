@@ -27,9 +27,12 @@ DEFAULT_WIDTH = 400
 MIN_SIZE = (300, 150)
 PAD_X = 18
 PAD_TOP = 14
-PAD_BOTTOM = 14
-ROW_GAP = 14
-SECTION_GAP = 24
+PAD_BOTTOM = 6  # 最後の行の ROW_GAP に足す
+ROW_GAP = 10
+SECTION_GAP = 12
+TITLE_GAP = 8
+SCREEN_MARGIN = 120  # メニューバー・タイトルバー・Dock の分
+SCROLL_STEP = 20
 BAR_HEIGHT = 8
 DOT_RADIUS = 3
 LABEL_INDENT = 12
@@ -139,6 +142,20 @@ def windows_dark_mode():
         return False
 
 
+def wheel_steps(delta):
+    """マウスホイールの delta を行数にする。Tk 9 は 1 ノッチ 120、Tk 8.6 の macOS は小さな値で届く。"""
+    if not delta:
+        return 0
+    value = delta / 120.0 if abs(delta) >= 120 else delta
+    return -int(value) or (-1 if value > 0 else 1)
+
+
+def touchpad_delta_y(delta):
+    """<TouchpadScroll> の delta から縦方向のピクセル量を取り出す（tk::PreciseScrollDeltas と同じ）。"""
+    low = delta & 0xFFFF
+    return low if low < 0x8000 else low - 0x10000
+
+
 def bar_color(percent, palette):
     if percent >= 95:
         return palette["crit"]
@@ -151,13 +168,15 @@ def bar_color(percent, palette):
 
 
 class UsageWindow(object):
-    def __init__(self, root, interval, topmost=False):
+    def __init__(self, root, interval, topmost=False, accounts=None):
         self.root = root
-        self.sources = {
-            "claude": self._source("Claude Usage"),
-            "codex": self._source("Codex Usage"),
-        }
+        accounts = accounts or [cu.Account("", None)]
+        self.sources = collections.OrderedDict()
+        for index, account in enumerate(accounts):
+            self.sources["claude%d" % index] = self._source(cu.account_title(account))
+        self.sources["codex"] = self._source("Codex Usage")
         self.row_count = None
+        self.content_height = None
         self.windowing = root.tk.call("tk", "windowingsystem")
         self.dark = self.windowing == "win32" and windows_dark_mode()
         # 高 DPI の Windows では Tk のポイント指定だけが拡大されるため、図形も合わせる
@@ -186,9 +205,20 @@ class UsageWindow(object):
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<Escape>", lambda event: self.close())
 
-        self.canvas = tk.Canvas(root, highlightthickness=0, borderwidth=0)
+        self.canvas = tk.Canvas(
+            root, highlightthickness=0, borderwidth=0, yscrollincrement=self.px(SCROLL_STEP),
+        )
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda event: self.redraw())
+        # 画面に収まらないときだけ意味を持つ。収まっている間は scrollregion が窓より小さく動かない
+        root.bind("<MouseWheel>", lambda event: self._scroll(wheel_steps(event.delta)))
+        try:
+            # Tk 8.7 以降の macOS ではトラックパッドは MouseWheel ではなくこちらで届く
+            root.bind("<TouchpadScroll>", self._on_touchpad)
+        except tk.TclError:
+            pass
+        root.bind("<Button-4>", lambda event: self._scroll(-1))
+        root.bind("<Button-5>", lambda event: self._scroll(1))
 
         if self.windowing == "aqua":
             root.bind("<Command-r>", self.refresh)
@@ -197,7 +227,11 @@ class UsageWindow(object):
             self._use_dark_title_bar()
 
         self.queue = queue.Queue()
-        self._start_source("claude", cu.Poller(), interval, cu.extract_windows, cu.CredentialsError, cu.UsageError)
+        for index, account in enumerate(accounts):
+            self._start_source(
+                "claude%d" % index, cu.Poller(account.config_dir), interval,
+                cu.extract_windows, cu.CredentialsError, cu.UsageError,
+            )
         self._start_source("codex", xu.Poller(), interval, xu.extract_windows, (), xu.CodexUsageError)
 
         self.root.after(DRAIN_INTERVAL_MS, self._drain)
@@ -322,23 +356,44 @@ class UsageWindow(object):
             pass
 
         width = canvas.winfo_width() or self.px(DEFAULT_WIDTH)
-        y = self.px(PAD_TOP)
+        y = self._draw_refresh_all(canvas, self.px(PAD_TOP), width, palette)
         for index, (name, source) in enumerate(self.sources.items()):
             if index:
                 y += self.px(SECTION_GAP)
             y = self._draw_source(canvas, name, source, y, width, palette)
 
+        height = y + self.px(PAD_BOTTOM)
+        canvas.configure(scrollregion=(0, 0, width, height))
+        self.content_height = height
         signature = tuple(
             (len(s["windows"]), bool(s["error"])) for s in self.sources.values()
         )
-        self._fit_height(signature, y + self.px(PAD_BOTTOM))
+        self._fit_height(signature, height)
+
+    def _draw_refresh_all(self, canvas, y, width, palette):
+        """右上に「↻ すべて更新」を置く。キーボードの更新と同じ動き。"""
+        busy = all(source["refreshing"] for source in self.sources.values())
+        shortcut = "⌘R" if self.windowing == "aqua" else "Ctrl+R"
+        right = width - self.px(PAD_X)
+        center = y + self.font_label.metrics("linespace") / 2.0
+        hint = canvas.create_text(
+            right, center, text=shortcut, anchor="e", fill=palette["dim"], font=self.font_small, tags=("refresh_all",),
+        )
+        canvas.create_text(
+            canvas.bbox(hint)[0] - self.px(6), center, text="↻ すべて更新", anchor="e",
+            fill=palette["dim"] if busy else palette["fg"], font=self.font_label, tags=("refresh_all",),
+        )
+        canvas.tag_bind("refresh_all", "<Button-1>", self.refresh)
+        return y + self.font_label.metrics("linespace") + self.px(TITLE_GAP)
 
     def _draw_source(self, canvas, name, source, y, width, palette):
         canvas.create_text(
             self.px(PAD_X), y, text=source["title"],
             anchor="nw", fill=palette["fg"], font=self.font_title,
         )
-        y += self.font_title.metrics("linespace") + self.px(12)
+        title_height = self.font_title.metrics("linespace")
+        self._draw_stamp(canvas, name, source, y + title_height / 2.0, width, palette)
+        y += title_height + self.px(TITLE_GAP)
 
         if not source["windows"]:
             message = "取得中…" if source["error"] is None else "表示できる枠がありません"
@@ -349,29 +404,29 @@ class UsageWindow(object):
         for window, text in zip(source["windows"], remaining):
             y = self._draw_row(canvas, window, y, width, palette, text, column)
 
-        y += self.px(2)
+        if source["error"]:
+            item = canvas.create_text(
+                self.px(PAD_X), y, text="取得失敗: " + source["error"], anchor="nw",
+                fill=palette["warn"], font=self.font_small, width=width - self.px(PAD_X) * 2,
+            )
+            y = canvas.bbox(item)[3] + self.px(ROW_GAP)
+
+        return y
+
+    def _draw_stamp(self, canvas, name, source, center, width, palette):
+        """見出しの右に「↻ 最終更新 HH:MM:SS」を置く。どちらを押しても更新する。"""
         stamp_label = "最終読込 " if name == "codex" else "最終更新 "
         stamp = "未取得" if source["last_ok_at"] is None else stamp_label + source["last_ok_at"].strftime("%H:%M:%S")
         icon = "↻"
         icon_color = palette["dim"] if source["refreshing"] else palette["fg"]
         tag = "refresh_" + name
+        right = width - self.px(PAD_X)
+        canvas.create_text(right, center, text=stamp, anchor="e", fill=palette["dim"], font=self.font_small, tags=(tag,))
         canvas.create_text(
-            self.px(PAD_X), y, text=icon, anchor="nw", fill=icon_color,
-            font=self.font_label, tags=(tag,),
+            right - self.font_small.measure(stamp) - self.px(6), center, text=icon, anchor="e",
+            fill=icon_color, font=self.font_label, tags=(tag,),
         )
         canvas.tag_bind(tag, "<Button-1>", lambda event, key=name: self.refresh_source(key, event))
-        stamp_x = self.px(PAD_X) + self.font_label.measure(icon) + self.px(6)
-        canvas.create_text(stamp_x, y, text=stamp, anchor="nw", fill=palette["dim"], font=self.font_small)
-        y += max(self.font_label.metrics("linespace"), self.font_small.metrics("linespace"))
-        if source["error"]:
-            y += self.px(2)
-            canvas.create_text(
-                self.px(PAD_X), y, text="取得失敗: " + source["error"], anchor="nw",
-                fill=palette["warn"], font=self.font_small, width=width - self.px(PAD_X) * 2,
-            )
-            y += self.font_small.metrics("linespace")
-
-        return y
 
     def _draw_row(self, canvas, window, y, width, palette, remaining, column):
         label_font = self.font_label_active if window.is_active else self.font_label
@@ -414,7 +469,18 @@ class UsageWindow(object):
         if row_count == self.row_count:
             return
         self.row_count = row_count
-        self.root.geometry("%dx%d" % (self.root.winfo_width() or self.px(DEFAULT_WIDTH), int(height)))
+        limit = self.root.winfo_screenheight() - self.px(SCREEN_MARGIN)
+        self.root.geometry("%dx%d" % (self.root.winfo_width() or self.px(DEFAULT_WIDTH), int(min(height, limit))))
+
+    def _on_touchpad(self, event):
+        dy = touchpad_delta_y(event.delta)
+        if not dy or not self.content_height:
+            return
+        self.canvas.yview_moveto(self.canvas.yview()[0] - dy / float(self.content_height))
+
+    def _scroll(self, steps):
+        if steps:
+            self.canvas.yview_scroll(steps, "units")
 
     def close(self):
         for source in self.sources.values():
@@ -444,16 +510,15 @@ def to_windows_path(path):
     return result.stdout.decode("utf-8").strip()
 
 
-def run_on_windows(python, args):
+def run_on_windows(python, args, accounts):
     """WSL の Tk は日本語や高 DPI の表示が崩れやすいので、Windows のネイティブ窓で表示する。
 
     認証情報とセッション記録は WSL 側のものを \\wsl.localhost 経由で読ませる。
     """
     env = dict(os.environ)
-    env["CLAUDE_CONFIG_DIR"] = to_windows_path(cu.CLAUDE_CONFIG_DIR)
     env["CODEX_HOME"] = to_windows_path(xu.CODEX_HOME)
     shared = [name for name in env.get("WSLENV", "").split(":") if name]
-    env["WSLENV"] = ":".join(shared + ["CLAUDE_CONFIG_DIR", "CODEX_HOME"])
+    env["WSLENV"] = ":".join(shared + ["CODEX_HOME"])
 
     command = [python]
     if os.path.basename(python) in ("py.exe", "pyw.exe"):
@@ -461,6 +526,8 @@ def run_on_windows(python, args):
     command += [to_windows_path(os.path.abspath(__file__)), "--interval", str(args.interval), "--from-wsl"]
     if args.topmost:
         command.append("--topmost")
+    for account in accounts:
+        command += ["--claude", "%s=%s" % (account.name, to_windows_path(account.config_dir or cu.CLAUDE_CONFIG_DIR))]
     child = subprocess.Popen(command, env=env, stdin=subprocess.PIPE)
     try:
         return child.wait()
@@ -489,11 +556,19 @@ def main(argv=None):
         default=cu.DEFAULT_INTERVAL,
         help="ポーリング間隔（秒、下限 %d、既定 %d）" % (cu.MIN_INTERVAL, cu.DEFAULT_INTERVAL),
     )
+    parser.add_argument(
+        "--claude",
+        action="append",
+        type=cu.parse_account,
+        metavar="[名前=]DIR",
+        help="表示する Claude の設定ディレクトリ。複数指定可。省略時は ~/.claude と ~/.claude-* のログイン済みのもの",
+    )
     parser.add_argument("--topmost", action="store_true", help="ウィンドウを常に手前に表示する")
     parser.add_argument("--wslg", action="store_true", help="WSL でも Windows の Python を使わず WSLg で表示する")
     # WSL 側から起動された Windows 側の窓。ロックは WSL 側が持ち、stdin が閉じたら終了する
     parser.add_argument("--from-wsl", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    accounts = args.claude or cu.discover_accounts()
 
     windows_python = None if args.wslg else find_windows_python()
     if args.from_wsl:
@@ -507,10 +582,10 @@ def main(argv=None):
 
     with lock:
         if windows_python:
-            return run_on_windows(windows_python, args)
+            return run_on_windows(windows_python, args, accounts)
         enable_dpi_awareness()
         root = tk.Tk()
-        window = UsageWindow(root, max(args.interval, cu.MIN_INTERVAL), topmost=args.topmost)
+        window = UsageWindow(root, max(args.interval, cu.MIN_INTERVAL), topmost=args.topmost, accounts=accounts)
         if args.from_wsl:
             window.close_on_stdin_eof()
         root.mainloop()

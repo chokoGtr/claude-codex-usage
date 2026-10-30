@@ -11,6 +11,8 @@ import argparse
 import collections
 import datetime
 import getpass
+import glob
+import hashlib
 import json
 import os
 import platform
@@ -32,8 +34,10 @@ except ImportError:  # Windows
 
 API_URL = "https://api.anthropic.com/api/oauth/usage"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
-CLAUDE_CONFIG_DIR = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude"))
-CREDENTIALS_PATH = os.path.join(CLAUDE_CONFIG_DIR, ".credentials.json")
+DEFAULT_CONFIG_DIR = os.path.expanduser("~/.claude")
+ENV_CONFIG_DIR = os.path.expanduser(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") else None
+CLAUDE_CONFIG_DIR = ENV_CONFIG_DIR or DEFAULT_CONFIG_DIR
+KEYCHAIN_NOT_FOUND = 44  # security コマンドの errSecItemNotFound
 LOCK_PATH = os.path.join(
     tempfile.gettempdir(),
     "claude-codex-usage-%s.lock" % (os.getuid() if hasattr(os, "getuid") else getpass.getuser()),
@@ -70,6 +74,9 @@ RESET_AT_WIDTH = 15
 WEEKDAYS = "月火水木金土日"
 
 
+Account = collections.namedtuple("Account", "name config_dir")
+
+
 class CredentialsError(Exception):
     """認証情報を読めなかった。メッセージにトークンは含めない。"""
 
@@ -94,12 +101,14 @@ class UsageError(Exception):
 # --- 認証情報 -------------------------------------------------------------
 
 
-def read_credentials():
-    """認証情報 JSON を読み取り専用で取得する。"""
+def read_credentials(config_dir=None):
+    """認証情報 JSON を読み取り専用で取得する。config_dir 省略時は CLAUDE_CONFIG_DIR に従う。"""
+    if config_dir is None:
+        config_dir = ENV_CONFIG_DIR
     if platform.system() == "Darwin":
-        raw = _read_keychain()
+        raw = _read_keychain(keychain_services(config_dir))
     else:
-        raw = _read_credentials_file()
+        raw = _read_credentials_file(os.path.join(config_dir or DEFAULT_CONFIG_DIR, ".credentials.json"))
     try:
         data = json.loads(raw)
     except ValueError:
@@ -109,41 +118,122 @@ def read_credentials():
     return data
 
 
-def _read_keychain():
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-        )
-    except OSError:
-        raise CredentialsError("security コマンドを実行できません") from None
-    except subprocess.SubprocessError:
-        raise CredentialsError("Keychain の読み取りがタイムアウトしました") from None
-    if result.returncode != 0:
-        raise CredentialsError("Keychain から認証情報を読めません（ロック中の可能性）")
-    return result.stdout.decode("utf-8", "replace")
+def keychain_services(config_dir):
+    """Keychain の項目名の候補。
+
+    Claude Code は CLAUDE_CONFIG_DIR を指定すると、そのパスの SHA-256 先頭 8 文字を付けた名前で保存する。
+    パスは指定された文字列のまま使われるため、末尾の / の有無も候補に入れる。
+    """
+    if config_dir is None:
+        return [KEYCHAIN_SERVICE]
+    paths = [config_dir]
+    trimmed = config_dir.rstrip("/")
+    if trimmed and trimmed != config_dir:
+        paths.append(trimmed)
+    services = [
+        "%s-%s" % (KEYCHAIN_SERVICE, hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]) for path in paths
+    ]
+    if trimmed == DEFAULT_CONFIG_DIR:
+        services.insert(0, KEYCHAIN_SERVICE)
+    return services
 
 
-def _read_credentials_file():
+def _read_keychain(services):
+    not_found = True
+    for service in services:
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", service, "-w"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except OSError:
+            raise CredentialsError("security コマンドを実行できません") from None
+        except subprocess.SubprocessError:
+            raise CredentialsError("Keychain の読み取りがタイムアウトしました") from None
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", "replace")
+        if result.returncode != KEYCHAIN_NOT_FOUND:
+            not_found = False
+    if not_found:
+        raise CredentialsError("Keychain に認証情報がありません（未ログインの可能性）")
+    raise CredentialsError("Keychain から認証情報を読めません（ロック中の可能性）")
+
+
+def _read_credentials_file(path):
     try:
-        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return f.read()
     except OSError:
-        raise CredentialsError("%s を読めません" % CREDENTIALS_PATH) from None
+        raise CredentialsError("%s を読めません" % path) from None
+
+
+def account_name(config_dir):
+    """~/.claude-work なら work。既定の ~/.claude は空文字。"""
+    # WSL から渡す Windows 形式のパスも扱えるよう、区切りは / と \ の両方を見る
+    base = config_dir.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lstrip(".")
+    if base.startswith("claude-"):
+        base = base[len("claude-"):]
+    return "" if base == "claude" else base
+
+
+def parse_account(text):
+    """`名前=ディレクトリ` または `ディレクトリ` を Account にする。名前を省くとディレクトリ名から付ける。"""
+    name, sep, path = text.partition("=")
+    if not sep:
+        name, path = "", text
+    path = os.path.expanduser(path.strip())
+    if not path:
+        raise argparse.ArgumentTypeError("ディレクトリを指定してください")
+    return Account(name.strip() or account_name(path), path)
+
+
+def account_title(account):
+    return "Claude · %s" % account.name if account.name else "Claude Usage"
+
+
+def has_credentials(config_dir):
+    """ログイン済みかどうかだけを見る。macOS でも認証情報の中身は読まない。"""
+    if platform.system() != "Darwin":
+        return os.path.isfile(os.path.join(config_dir, ".credentials.json"))
+    for service in keychain_services(config_dir):
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", service],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if result.returncode == 0:
+            return True
+    return False
+
+
+def discover_accounts():
+    """CLAUDE_CONFIG_DIR 指定時はそれだけ。無ければ ~/.claude と ~/.claude-* のうちログイン済みのもの。"""
+    if ENV_CONFIG_DIR is not None:
+        return [Account("", None)]
+    dirs = [DEFAULT_CONFIG_DIR] + sorted(
+        path for path in glob.glob(glob.escape(DEFAULT_CONFIG_DIR) + "-*") if os.path.isdir(path)
+    )
+    accounts = [Account(account_name(path), path) for path in dirs if has_credentials(path)]
+    return accounts or [Account("", None)]
 
 
 class TokenStore(object):
     """アクセストークンを内部に閉じ込める。値を返す getter は持たない。"""
 
-    def __init__(self):
+    def __init__(self, config_dir=None):
+        self._config_dir = config_dir
         self._token = None
         self._expires_at_ms = None
         self.load()
 
     def load(self):
-        oauth = read_credentials().get("claudeAiOauth")
+        oauth = read_credentials(self._config_dir).get("claudeAiOauth")
         if not isinstance(oauth, dict):
             raise CredentialsError("認証情報に claudeAiOauth がありません")
         token = oauth.get("accessToken")
@@ -411,8 +501,11 @@ def _truncate(text, width):
     return result + "…"
 
 
-def render_lines(windows, last_ok_at, error, term_width, now=None, tz=None):
-    lines = [" " + ESC_BOLD + "Claude Usage" + ESC_RESET, ""]
+def render_lines(windows, last_ok_at, error, term_width, now=None, tz=None, title="Claude Usage"):
+    """1 アカウント分。複数並べても端末に収まるよう、見出しと最終更新を 1 行にまとめる。"""
+    stamp = "未取得" if last_ok_at is None else "最終更新 " + last_ok_at.strftime("%H:%M:%S")
+    title = _truncate(title, max(term_width - display_width(stamp) - 4, 8))
+    lines = [" " + ESC_BOLD + title + ESC_RESET + "  " + ESC_DIM + stamp + ESC_RESET]
 
     labels = [_truncate(w.label, MAX_LABEL_WIDTH) for w in windows]
     label_width = max([display_width(x) for x in labels] + [0])
@@ -439,11 +532,6 @@ def render_lines(windows, last_ok_at, error, term_width, now=None, tz=None):
             line += " ←"
         lines.append(line)
 
-    lines.append("")
-    if last_ok_at is None:
-        lines.append(" " + ESC_DIM + "未取得" + ESC_RESET)
-    else:
-        lines.append(" " + ESC_DIM + "最終更新 " + last_ok_at.strftime("%H:%M:%S") + ESC_RESET)
     if error:
         lines.append(" " + ESC_YELLOW + "取得失敗: " + error + "（表示は最終取得値）" + ESC_RESET)
     return lines
@@ -474,12 +562,13 @@ def backoff_delay(interval, failures, retry_after=None, rate_limited=False):
 class Poller(object):
     """トークンの再読み込み条件（401 と期限切れ）だけを扱う。"""
 
-    def __init__(self):
+    def __init__(self, config_dir=None):
+        self._config_dir = config_dir
         self._store = None
 
     def poll(self):
         if self._store is None:
-            self._store = TokenStore()
+            self._store = TokenStore(self._config_dir)
         if self._store.is_expired():
             self._store.reload()
             if self._store.is_expired():
@@ -503,34 +592,58 @@ class Poller(object):
         self._store = None
 
 
-def run(interval, stream, poller=None, sleep=time.sleep):
-    poller = poller or Poller()
-    windows = []
-    last_ok_at = None
-    error = None
-    failures = 0
+class AccountState(object):
+    """1 アカウント分の表示値と、次に取得する時刻。失敗時の待ち時間はアカウントごとに伸ばす。"""
 
-    while True:
+    def __init__(self, title, poller):
+        self.title = title
+        self.poller = poller
+        self.windows = []
+        self.last_ok_at = None
+        self.error = None
+        self.failures = 0
+        self.due = 0.0
+
+    def poll(self, interval, now):
         retry_after = None
         rate_limited = False
         try:
-            windows = extract_windows(poller.poll())
-            last_ok_at = datetime.datetime.now()
-            error = None
-            failures = 0
+            self.windows = extract_windows(self.poller.poll())
+            self.last_ok_at = datetime.datetime.now()
+            self.error = None
+            self.failures = 0
         except CredentialsError as exc:
-            poller.invalidate()
-            error = str(exc)
-            failures += 1
+            self.poller.invalidate()
+            self.error = str(exc)
+            self.failures += 1
         except UsageError as exc:
-            error = str(exc)
+            self.error = str(exc)
             retry_after = exc.retry_after
             rate_limited = exc.status == 429
-            failures += 1
+            self.failures += 1
+        self.due = now + backoff_delay(interval, self.failures, retry_after, rate_limited)
+
+
+def run(interval, stream, poller=None, sleep=time.sleep, accounts=None, clock=time.monotonic):
+    if poller is not None:
+        states = [AccountState("Claude Usage", poller)]
+    else:
+        states = [AccountState(account_title(a), Poller(a.config_dir)) for a in accounts or [Account("", None)]]
+
+    while True:
+        now = clock()
+        for state in states:
+            if state.due <= now:
+                state.poll(interval, now)
 
         term_width = shutil.get_terminal_size((80, 24)).columns
-        draw(stream, render_lines(windows, last_ok_at, error, term_width))
-        sleep(backoff_delay(interval, failures, retry_after, rate_limited))
+        lines = []
+        for state in states:
+            if lines:
+                lines.append("")
+            lines += render_lines(state.windows, state.last_ok_at, state.error, term_width, title=state.title)
+        draw(stream, lines)
+        sleep(max(min(state.due for state in states) - now, 0))
 
 
 def acquire_lock(path=None):
@@ -573,6 +686,13 @@ def main(argv=None):
         default=DEFAULT_INTERVAL,
         help="ポーリング間隔（秒、下限 %d、既定 %d）" % (MIN_INTERVAL, DEFAULT_INTERVAL),
     )
+    parser.add_argument(
+        "--claude",
+        action="append",
+        type=parse_account,
+        metavar="[名前=]DIR",
+        help="表示する Claude の設定ディレクトリ。複数指定可。省略時は ~/.claude と ~/.claude-* のログイン済みのもの",
+    )
     args = parser.parse_args(argv)
     interval = max(args.interval, MIN_INTERVAL)
 
@@ -588,7 +708,7 @@ def main(argv=None):
         stream.write(ESC_ALT_ON + ESC_HIDE_CURSOR)
         stream.flush()
         try:
-            run(interval, stream)
+            run(interval, stream, accounts=args.claude or discover_accounts())
         except (KeyboardInterrupt, SystemExit):
             pass
         finally:
